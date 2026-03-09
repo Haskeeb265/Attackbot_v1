@@ -1,0 +1,26 @@
+[tool.ruff]
+line-length = 100
+select = ["E", "F", "I", "UP"]
+ignore = ["E501"]
+exclude = ["backend/migrations/versions/"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+ignore_missing_imports = true
+exclude = ["backend/migrations/"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+
+[tool.coverage.run]
+source = ["backend"]
+omit = ["*/migrations/*", "*/__init__.py", "*/tests/*"]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = false
