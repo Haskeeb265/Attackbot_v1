@@ -1,7 +1,7 @@
 # AttackBot — Project Progress
 
 > Last updated: 2026-03-10
-> Current state: **M1 complete. All 21 containers healthy. Ready for M2.**
+> Current state: **M1 complete. 35/35 unit tests passing. 4/4 integration tests passing. Ready for M2.**
 
 ---
 
@@ -73,8 +73,8 @@
 - [x] `services/ai_analysis_worker/worker.py` — consumes `ai.analysis.jobs`
 
 ### Tests
-- [x] `tests/unit/test_shared.py` — 35 unit tests, all passing
-- [x] `tests/integration/test_infra_startup.py` — DB connectivity + table existence
+- [x] `tests/unit/test_shared.py` — **35/35 passing** ✅ (exceptions, health, envelope, scan_jobs, report_jobs)
+- [x] `tests/integrations/test_infra_startup.py` — **4/4 passing** ✅ (DB health, query execution, programs table, scans table)
 - [x] `tests/conftest.py` — singleton reset fixture
 
 ### CI
