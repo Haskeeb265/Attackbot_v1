@@ -1,66 +1,63 @@
-# backend/shared/db.py
-from collections.abc import AsyncGenerator
+"""
+AttackBot shared database utilities.
+Provides async SQLAlchemy engine, session factory, and health check.
+"""
 from contextlib import asynccontextmanager
+from typing import AsyncGenerator
 
-from sqlalchemy import text
 from sqlalchemy.ext.asyncio import (
+    AsyncEngine,
     AsyncSession,
     async_sessionmaker,
     create_async_engine,
 )
 from sqlalchemy.orm import DeclarativeBase
+from sqlalchemy import text
 
-from backend.shared.logging import get_logger
-
-log = get_logger(__name__)
-
-
-class Base(DeclarativeBase):
-    """All SQLAlchemy ORM models inherit from this."""
-
-    pass
-
-
-_engine = None
+# Global engine and session factory — initialised by init_db()
+_engine: AsyncEngine | None = None
 _session_factory: async_sessionmaker[AsyncSession] | None = None
 
 
-def init_db(
-    database_url: str,
-    pool_size: int = 10,
-    max_overflow: int = 20,
-) -> None:
+class Base(DeclarativeBase):
+    """SQLAlchemy declarative base. All ORM models inherit from this."""
+    pass
+
+
+def init_db(database_url: str, pool_size: int = 5, max_overflow: int = 10) -> None:
     """
-    Call once at service startup.
-    Creates the async engine and session factory.
+    Initialise the async engine and session factory.
+    Call once during service startup in the lifespan context manager.
     """
     global _engine, _session_factory
     _engine = create_async_engine(
         database_url,
         pool_size=pool_size,
         max_overflow=max_overflow,
+        pool_pre_ping=True,
         echo=False,
-        pool_pre_ping=True,  # detect stale connections before use
     )
     _session_factory = async_sessionmaker(
-        _engine,
+        bind=_engine,
         class_=AsyncSession,
         expire_on_commit=False,
+        autocommit=False,
+        autoflush=False,
     )
-    log.info("db_initialized", pool_size=pool_size, max_overflow=max_overflow)
 
 
 @asynccontextmanager
 async def get_session() -> AsyncGenerator[AsyncSession, None]:
     """
-    Async context manager for database sessions.
+    Provide a transactional database session.
+    Auto-commits on success, auto-rolls back on exception.
 
     Usage:
         async with get_session() as session:
-            result = await session.execute(...)
+            result = await session.execute(select(Program))
     """
     if _session_factory is None:
-        raise RuntimeError("Database not initialized. Call init_db() first.")
+        raise RuntimeError("Database not initialised. Call init_db() first.")
     async with _session_factory() as session:
         try:
             yield session
@@ -71,11 +68,12 @@ async def get_session() -> AsyncGenerator[AsyncSession, None]:
 
 
 async def check_db_health() -> bool:
-    """Ping the database. Used by /health endpoints."""
+    """Return True if the database is reachable, False otherwise."""
+    if _engine is None:
+        return False
     try:
-        async with get_session() as session:
-            await session.execute(text("SELECT 1"))
+        async with _engine.connect() as conn:
+            await conn.execute(text("SELECT 1"))
         return True
-    except Exception as e:
-        log.warning("db_health_check_failed", error=str(e))
+    except Exception:
         return False

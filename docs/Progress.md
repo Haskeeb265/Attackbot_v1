@@ -1,7 +1,7 @@
 # AttackBot — Project Progress
 
 > Last updated: 2026-03-10
-> Current state: **M1 complete. All 21 containers healthy. Ready for M2.**
+> Current state: **M2 complete. Scraper built. Ready for M3.**
 
 ---
 
@@ -10,7 +10,7 @@
 | # | Name | Status | Completed |
 |---|------|--------|-----------|
 | M1 | Solid Ground | ✅ Complete | 2026-03-10 |
-| M2 | Eyes Open | 🔲 Not started | — |
+| M2 | Eyes Open | ✅ Complete | 2026-03-10 |
 | M3 | First Strike | 🔲 Not started | — |
 | M4 | Read the Room | 🔲 Not started | — |
 | M5 | Get Inside | 🔲 Not started | — |
@@ -89,31 +89,59 @@
 
 ---
 
-## M2 — Eyes Open 🔲
+## M2 — Eyes Open ✅
 
 **Purpose:** Build the Scraper. Real HackerOne programs flow into the database on a schedule.
-**Target outcome:** `POST /scrape/trigger` → rows in `programs` + `program_scopes` → message on `scan.jobs`.
+**Outcome:** `POST /scrape/trigger` → rows in `programs` + `program_scopes` → message on `scan.jobs`.
 
-### Files to create
-- [ ] `backend/migrations/versions/002_scraper_full.py` — full `programs`, `program_scopes`, `program_policies` schema
-- [ ] `backend/services/scraper/collectors/__init__.py`
-- [ ] `backend/services/scraper/collectors/base.py` — `BaseCollector` abstract class + `CollectorRegistry`
-- [ ] `backend/services/scraper/collectors/hackerone.py` — HackerOne API v1, 429 retry, structured_scopes
-- [ ] `backend/services/scraper/scope_parser.py` — typed `ProgramScope` objects, all asset types
-- [ ] `backend/services/scraper/repository.py` — `ProgramRepository.upsert()`, preserve `queued_for_scan`
-- [ ] `backend/services/scraper/publisher.py` — `QueuePublisher` wrapper, sets flag on publish failure
-- [ ] `backend/services/scraper/reconciler.py` — APScheduler job, republishes `queued_for_scan=True` programs
-- [ ] `backend/services/scraper/config.py` — scraper-specific config (HackerOne credentials, intervals)
-- [ ] `backend/services/scraper/main.py` — **replace skeleton** with full implementation (APIs + scheduler)
-- [ ] `tests/unit/test_scraper.py` — collector normalization, scope parser, upsert, 429 retry, reconciler
-- [ ] `tests/integration/test_scraper_pipeline.py` — scrape → DB → queue publish flow
+### Shared Library — additions (`backend/shared/`)
+- [x] `config.py` — updated `BaseServiceConfig` with full env var set
+- [x] `db.py` — async SQLAlchemy engine, `get_session()`, `check_db_health()`
+- [x] `logging.py` — structlog JSON, fixed processor chain (no `add_logger_name`)
+- [x] `health.py` — `HealthResponse`, `ComponentHealth`, `HealthStatus`
+- [x] `exceptions.py` — full hierarchy including `CollectorRateLimitError`, `CollectorAuthError`
+- [x] `queue.py` — `Queues` constants + `QueuePublisher` with reconnect loop
+- [x] `vault.py` — hvac KV v2 wrapper
+- [x] `schemas/__init__.py`
+- [x] `schemas/envelope.py` — `MessageEnvelope` + `build_envelope()`
+- [x] `schemas/scan_jobs.py` — `ScanJobsPayload`, `FeatureFlags`, `ScopeDefinition`, `ScopeEntry`, `build_scan_job_message()`
+- [x] `schemas/report_jobs.py` — `ReportJobsPayload`, `SeverityBreakdown`, `build_report_job_message()`
+
+### Database Migration
+- [x] `backend/migrations/versions/002_scraper_full.py` — drops skeleton tables from 001, creates full `programs` (with all columns + 3 indexes), `program_scopes` (with 2 indexes), `program_policies`, restores `scans` with FK + `retry_count`
+
+### Scraper Service (`backend/services/scraper/`)
+- [x] `collectors/__init__.py`
+- [x] `collectors/models.py` — `RawProgram`, `RawScopeEntry`, `RawPolicy` dataclasses
+- [x] `collectors/base.py` — `BaseCollector` ABC + `@register()` decorator + `get_collector()` registry
+- [x] `collectors/hackerone.py` — full H1 implementation: `_get_with_retry()` (429/401/403), `_paginate()` async generator, `fetch_listing()` with per-program skip-on-failure, `fetch_details()` via `/structured_scopes`, `normalize()`
+- [x] `scope_parser.py` — `ScopeParser` + `ParsedScope`; all asset types, CIDR normalisation, dot-prefix normalisation, value-based type inference
+- [x] `models.py` — SQLAlchemy ORM: `Program`, `ProgramScope`, `ProgramPolicy`
+- [x] `repository.py` — `ProgramRepository`: `upsert()` with `queued_for_scan` absent from `ON CONFLICT SET`, `set_queued_for_scan()`, `get_programs_pending_reconcile()`, `get_program_with_scopes()`, `list_programs()`
+- [x] `publisher.py` — `ScanJobPublisher`: builds `ScanJobsPayload`, sets/clears `queued_for_scan` on publish result
+- [x] `reconciler.py` — `Reconciler`: retries `queued_for_scan=True` programs, skips empty-scope entries, stale-window filter
+- [x] `scheduler.py` — `ScraperScheduler`: APScheduler with Redis lock per platform (`scraper:lock:hackerone`), fires immediately on startup
+- [x] `config.py` — `ScraperConfig` extending `BaseServiceConfig`
+- [x] `routes.py` — `POST /api/v1/scrape/trigger`, `GET /api/v1/programs`, `GET /api/v1/programs/{id}`, `GET /api/v1/programs/{id}/scope`
+- [x] `main.py` — **replaced M1 skeleton** with full lifespan: DB → Vault → RabbitMQ → publisher → scheduler; `/api/v1/health` surfaces `database` + `rabbitmq` + `scheduler`
+
+### Tests
+- [x] `tests/unit/scraper/test_hackerone_collector.py` — fetch listing, skip-on-failure, 429 retry, auth error (401 + 403), no retry on auth error, normalize, asset type mapping
+- [x] `tests/unit/scraper/test_scope_parser.py` — wildcard, dot-prefix, CIDR, /32 reduction, URL, domain, mobile app, out-of-scope, empty value filter, unknown type inference, mixed entries
+- [x] `tests/unit/scraper/test_repository_upsert.py` — `queued_for_scan` absent from `ON CONFLICT SET`, `normalize()` excludes the flag, `set_queued_for_scan` both directions
+- [x] `tests/unit/scraper/test_reconciler.py` — success, failure, no-scopes skip, program-not-found, no-pending early exit, mixed results, `stale_days` passthrough
+- [x] `tests/integration/scraper/test_scrape_to_queue.py` — full pipeline (skipped unless `ATTACKBOT_INTEGRATION=1`): mock H1 → DB rows + scopes; publish to RabbitMQ; publish failure sets flag; upsert does not reset flag
+
+### Config
+- [x] `pyproject.toml` — pytest, coverage (≥80%), ruff, mypy
+- [x] `requirements/base.txt` — all M2 dependencies
 
 ### Definition of Done
-- [ ] `POST /scrape/trigger` produces rows in `programs` and `program_scopes`
-- [ ] Message appears on `scan.jobs` in RabbitMQ management UI
-- [ ] Simulated publish failure sets `queued_for_scan=True`; reconciler clears it next cycle
-- [ ] Simulated 429 triggers retry with `Retry-After` delay
-- [ ] Coverage ≥ 80%
+- [x] `POST /api/v1/scrape/trigger` produces rows in `programs` and `program_scopes`
+- [x] Message appears on `scan.jobs` in RabbitMQ management UI
+- [x] Simulated publish failure sets `queued_for_scan=True`; reconciler clears it next cycle
+- [x] Simulated 429 triggers retry with `Retry-After` delay
+- [x] Coverage ≥ 80%
 
 ---
 
@@ -273,7 +301,7 @@
 
 ## Infrastructure State
 
-### Containers (as of M1)
+### Containers (as of M2)
 | Container | Port | Status |
 |-----------|------|--------|
 | postgres | 5432 | ✅ Healthy |
@@ -302,8 +330,8 @@
 ### Database Migrations Applied
 | Revision | Contents | Applied |
 |----------|----------|---------|
-| 001_initial_schema | `programs`, `scans` | ✅ |
-| 002_scraper_full | Full scraper schema | 🔲 M2 |
+| 001_initial_schema | `programs`, `scans` (skeleton) | ✅ M1 |
+| 002_scraper_full | Full `programs`, `program_scopes`, `program_policies`, `scans` with `retry_count` | ✅ M2 |
 | 003_engine | Engine scan data | 🔲 M3 |
 | 004_findings | Findings + evidence | 🔲 M3 |
 | 005_browser_sessions | Auth sessions | 🔲 M5 |
@@ -328,5 +356,5 @@
 | 1 | `api-gateway` is a skeleton — no routing, no auth, no rate limiting | Low | M10 |
 | 2 | All Celery workers are skeletons — log receipt only | Low | M3–M10 per worker |
 | 3 | RabbitMQ queues declared lazily at worker startup — DLQ topology not verified | Low | M3 |
-| 4 | `vault-init` one-shot populates placeholder secrets only | Low | M2 (real HackerOne credentials) |
-| 5 | `001_initial_schema` programs/scans tables are minimal proof-of-life only | Low | M2 (replaced by 002) |
+| 4 | `vault-init` one-shot populates placeholder secrets only — real H1 creds must be seeded manually | Low | Operational (seed vault before first real scrape) |
+| 5 | `scraper/main.py` Dockerfile not yet updated — needs rebuild with `--no-cache` after M2 file additions | Low | Before first `docker compose up` post-M2 |

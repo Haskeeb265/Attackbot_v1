@@ -1,46 +1,40 @@
-# backend/shared/config.py
-from pydantic_settings import BaseSettings, SettingsConfigDict
+"""
+AttackBot shared base configuration.
+All services subclass BaseServiceConfig.
+Values are loaded from environment variables via Pydantic Settings.
+"""
+from pydantic_settings import BaseSettings
+from pydantic import Field
 
 
 class BaseServiceConfig(BaseSettings):
-    """
-    Base configuration inherited by every service.
-    Each service subclasses this and adds its own fields.
-    Settings are loaded from environment variables (with optional .env fallback).
-    """
+    service_name: str = "attackbot-service"
 
-    model_config = SettingsConfigDict(
-        env_file=".env",
-        env_file_encoding="utf-8",
-        case_sensitive=False,
-        extra="ignore",
-    )
+    # ── Database ───────────────────────────────────────────────────
+    database_url: str = "postgresql+asyncpg://attackbot:attackbot@postgres:5432/attackbot"
+    db_pool_size: int = 5
+    db_max_overflow: int = 10
 
-    # ── Database ───────────────────────────────────────────────────────
-    database_url: str = (
-        "postgresql+asyncpg://attackbot:attackbot@localhost:5432/attackbot"
-    )
-    db_pool_size: int = 10
-    db_max_overflow: int = 20
-    db_pool_timeout: int = 30
+    # ── Redis ──────────────────────────────────────────────────────
+    redis_url: str = "redis://redis:6379/0"
 
-    # ── Redis ──────────────────────────────────────────────────────────
-    redis_url: str = "redis://localhost:6379/0"
+    # ── RabbitMQ ───────────────────────────────────────────────────
+    rabbitmq_url: str = "amqp://attackbot:attackbot@rabbitmq:5672/"
 
-    # ── RabbitMQ ───────────────────────────────────────────────────────
-    rabbitmq_url: str = "amqp://attackbot:attackbot@localhost:5672/"
-
-    # ── Vault ──────────────────────────────────────────────────────────
-    vault_url: str = "http://localhost:8200"
+    # ── Vault ──────────────────────────────────────────────────────
+    vault_url: str = "http://vault:8200"
     vault_token: str = "dev-root-token"
 
-    # ── MinIO ──────────────────────────────────────────────────────────
-    minio_endpoint: str = "localhost:9000"
-    minio_access_key: str = "minioadmin"
-    minio_secret_key: str = "minioadmin"
-    minio_secure: bool = False
+    # ── MinIO ──────────────────────────────────────────────────────
+    minio_url: str = "http://minio:9000"
+    minio_access_key: str = "attackbot"
+    minio_secret_key: str = "attackbot123"
+    minio_bucket_reports: str = "reports"
+    minio_bucket_evidence: str = "evidence"
+    minio_bucket_js_assets: str = "js-assets"
+    minio_bucket_summaries: str = "summaries"
 
-    # ── Service identity ───────────────────────────────────────────────
-    service_name: str = "unknown"
+    # ── Logging ────────────────────────────────────────────────────
     log_level: str = "INFO"
-    environment: str = "development"
+
+    model_config = {"env_file": ".env", "env_file_encoding": "utf-8", "extra": "ignore"}

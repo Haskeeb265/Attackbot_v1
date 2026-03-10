@@ -1,28 +1,26 @@
-# backend/shared/health.py
-from datetime import datetime
+"""
+AttackBot shared health check models.
+Every service exposes GET /api/v1/health returning HealthResponse.
+"""
+from datetime import datetime, timezone
 from enum import Enum
-
-from pydantic import BaseModel
+from typing import Optional
+from pydantic import BaseModel, Field
 
 
 class HealthStatus(str, Enum):
     HEALTHY = "healthy"
-    DEGRADED = "degraded"
     UNHEALTHY = "unhealthy"
+    DEGRADED = "degraded"
 
 
 class ComponentHealth(BaseModel):
     status: HealthStatus
-    latency_ms: float | None = None
-    detail: str | None = None
+    detail: Optional[str] = None
 
 
 class HealthResponse(BaseModel):
     status: HealthStatus
     service: str
-    timestamp: datetime
-    version: str = "1.0.0"
-    components: dict[str, ComponentHealth] = {}
-
-    def is_healthy(self) -> bool:
-        return self.status == HealthStatus.HEALTHY
+    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    components: dict[str, ComponentHealth] = Field(default_factory=dict)

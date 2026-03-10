@@ -1,7 +1,9 @@
-# backend/shared/vault.py
+"""
+AttackBot shared Vault integration.
+Wraps hvac for KV v2 secret access.
+"""
 import hvac
-
-from backend.shared.logging import get_logger
+from shared.logging import get_logger
 
 log = get_logger(__name__)
 
@@ -9,40 +11,37 @@ _client: hvac.Client | None = None
 
 
 def init_vault(vault_url: str, vault_token: str) -> None:
-    """
-    Initialize the Vault client. Call once at service startup.
-    Raises RuntimeError if authentication fails.
-    """
+    """Initialise the Vault client. Call once during service startup."""
     global _client
     _client = hvac.Client(url=vault_url, token=vault_token)
-    if not _client.is_authenticated():
-        raise RuntimeError(f"Vault authentication failed. URL: {vault_url}")
-    log.info("vault_connected", url=vault_url)
+    try:
+        if _client.is_authenticated():
+            log.info("vault_connected", url=vault_url)
+        else:
+            log.warning("vault_not_authenticated", url=vault_url)
+    except Exception as e:
+        log.warning("vault_connect_warning", url=vault_url, error=str(e))
 
 
 def get_secret(path: str, key: str) -> str:
     """
-    Read a single key from a KV v2 secret path.
-
-    Args:
-        path: Vault KV path (e.g. "attackbot/platform/hackerone")
-        key:  Key within the secret (e.g. "api_token")
-
-    Returns:
-        The secret value as a string.
+    Read a secret value from Vault KV v2.
+    path: e.g. "attackbot/platform/hackerone"
+    key:  e.g. "api_token"
+    Raises KeyError if path or key not found.
     """
     if _client is None:
-        raise RuntimeError("Vault not initialized. Call init_vault() first.")
-    response = _client.secrets.kv.read_secret_version(path=path)
-    return str(response["data"]["data"][key])
+        raise RuntimeError("Vault not initialised. Call init_vault() first.")
+    response = _client.secrets.kv.v2.read_secret_version(path=path)
+    data = response["data"]["data"]
+    if key not in data:
+        raise KeyError(f"Key {key!r} not found at Vault path {path!r}")
+    return data[key]
 
 
-def put_secret(path: str, data: dict[str, str]) -> None:
-    """
-    Write a set of key-value pairs to a KV v2 path.
-    Creates or overwrites the secret at the given path.
-    """
+def put_secret(path: str, values: dict[str, str]) -> None:
+    """Write secret values to Vault KV v2."""
     if _client is None:
-        raise RuntimeError("Vault not initialized. Call init_vault() first.")
-    _client.secrets.kv.create_or_update_secret(path=path, secret=data)
+        raise RuntimeError("Vault not initialised. Call init_vault() first.")
+    _client.secrets.kv.v2.create_or_update_secret(path=path, secret=values)
     log.info("vault_secret_written", path=path)

@@ -1,61 +1,76 @@
-# backend/shared/exceptions.py
+"""
+AttackBot shared exception hierarchy.
+All custom exceptions are rooted at AttackBotError.
+"""
 
 
 class AttackBotError(Exception):
-    """Base exception for all AttackBot errors."""
+    """Root exception for all AttackBot errors."""
 
 
-# ── Scan lifecycle ─────────────────────────────────────────────────────────
+# ── Scan errors ────────────────────────────────────────────────────────
 
 class ScanError(AttackBotError):
-    """Non-fatal scan stage failure. Scan continues as partial."""
+    """A recoverable error during scan execution."""
 
 
 class ScanTimeoutError(ScanError):
-    """A CLI tool or external request exceeded its timeout."""
+    """A CLI tool or async operation timed out."""
+
+
+class ScanInternalError(ScanError):
+    """An unrecoverable internal error during a scan stage."""
 
 
 class ScopeFatalError(AttackBotError):
-    """Stage 0 fatal: scope cannot be resolved. Scan must abort."""
+    """
+    Scope resolution failed fatally.
+    The scan cannot continue without a valid scope definition.
+    Always stops the pipeline.
+    """
 
 
-class ScanInternalError(AttackBotError):
-    """Stage 10 fatal: aggregation failed. Data integrity at risk."""
-
-
-class ScanAuthError(AttackBotError):
-    """Browser session bootstrap failed critically."""
-
-
-# ── Infrastructure ─────────────────────────────────────────────────────────
+# ── Queue errors ───────────────────────────────────────────────────────
 
 class QueueError(AttackBotError):
-    """RabbitMQ publish/consume failure."""
+    """Base class for all queue-related errors."""
 
 
 class QueueConnectionError(QueueError):
-    """Cannot establish RabbitMQ connection."""
+    """Failed to connect or reconnect to the message broker."""
 
+
+class QueuePublishError(QueueError):
+    """Failed to publish a message to a queue."""
+
+
+# ── Storage errors ─────────────────────────────────────────────────────
 
 class StorageError(AttackBotError):
-    """MinIO read/write failure."""
+    """Failed to read from or write to object storage."""
 
 
-# ── Platform collectors ────────────────────────────────────────────────────
+# ── Collector errors ───────────────────────────────────────────────────
 
 class CollectorError(AttackBotError):
-    """Generic platform scraping failure."""
+    """Base class for platform collector errors."""
 
 
 class CollectorRateLimitError(CollectorError):
-    """Platform returned HTTP 429 after all retries."""
+    """
+    Platform API rate limit exhausted after all retries.
+    The collector should be retried after a delay.
+    """
 
 
 class CollectorAuthError(CollectorError):
-    """Platform API credentials rejected."""
+    """
+    Platform API authentication failed (401/403).
+    Credentials should be checked — retrying will not help.
+    """
 
 
-# ── Schema ─────────────────────────────────────────────────────────────────
+# ── Schema errors ──────────────────────────────────────────────────────
 
 class MessageSchemaError(AttackBotError):
-    """Incoming queue message failed schema validation."""
+    """A message payload does not match the expected schema."""
