@@ -1,0 +1,29 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: api-gateway
+    static_configs:
+      - targets: ["api-gateway:8000"]
+    metrics_path: /metrics
+
+  - job_name: scraper
+    static_configs:
+      - targets: ["scraper:8001"]
+    metrics_path: /metrics
+
+  - job_name: core-engine
+    static_configs:
+      - targets: ["core-engine:8002"]
+    metrics_path: /metrics
+
+  - job_name: reporter
+    static_configs:
+      - targets: ["reporter:8003"]
+    metrics_path: /metrics
+
+  - job_name: attack-graph-engine
+    static_configs:
+      - targets: ["attack-graph-engine:8006"]
+    metrics_path: /metrics

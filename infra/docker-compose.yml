@@ -1,0 +1,596 @@
+# infra/docker-compose.yml
+# AttackBot — Full infrastructure
+# Build context is the repo root (one level up from infra/).
+# Run with: docker compose -f infra/docker-compose.yml --env-file ../.env up -d
+
+name: attackbot
+
+networks:
+  attackbot-net:
+    driver: bridge
+
+volumes:
+  postgres_data:
+  redis_data:
+  rabbitmq_data:
+  neo4j_data:
+  minio_data:
+  vault_data:
+  prometheus_data:
+  grafana_data:
+  loki_data:
+
+# ═══════════════════════════════════════════════════════════════════════
+# PHASE 1 — INFRASTRUCTURE (no depends_on; start unconditionally)
+# ═══════════════════════════════════════════════════════════════════════
+services:
+
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks: [attackbot-net]
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits: { cpus: "1.0", memory: "1G" }
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} && psql -U ${POSTGRES_USER} -c 'SELECT 1'"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 60s
+
+  redis:
+    image: redis:7-alpine
+    volumes:
+      - redis_data:/data
+    networks: [attackbot-net]
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits: { cpus: "0.5", memory: "256M" }
+    healthcheck:
+      test: ["CMD", "redis-cli", "--raw", "incr", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+  rabbitmq:
+    image: rabbitmq:3-management
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_DEFAULT_USER}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_DEFAULT_PASS}
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+    networks: [attackbot-net]
+    ports:
+      - "15672:15672"   # management UI — restrict to localhost in prod
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits: { cpus: "1.0", memory: "512M" }
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "check_port_connectivity"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 60s
+
+  neo4j:
+    image: neo4j:5-community
+    environment:
+      NEO4J_AUTH: ${NEO4J_AUTH}
+    volumes:
+      - neo4j_data:/data
+    networks: [attackbot-net]
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits: { cpus: "1.0", memory: "1G" }
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://localhost:7474 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 60s   # Neo4j takes 30–60s to boot — do NOT reduce this
+
+  minio:
+    image: minio/minio
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+    volumes:
+      - minio_data:/data
+    networks: [attackbot-net]
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits: { cpus: "0.5", memory: "512M" }
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+  vault:
+    image: hashicorp/vault:1.15
+    command: vault server -dev -dev-root-token-id="dev-root-token"
+    environment:
+      VAULT_DEV_ROOT_TOKEN_ID: ${VAULT_DEV_ROOT_TOKEN_ID}
+      VAULT_DEV_LISTEN_ADDRESS: "0.0.0.0:8200"
+    cap_add:
+      - IPC_LOCK
+    networks: [attackbot-net]
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits: { cpus: "0.5", memory: "256M" }
+    healthcheck:
+      test: ["CMD", "vault", "status", "-address=http://localhost:8200"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
+    # WARNING: Dev mode does NOT persist secrets across restarts.
+    # Acceptable for local development. Do NOT use in production.
+
+# ═══════════════════════════════════════════════════════════════════════
+# PHASE 2 — INIT (one-shot services; exit 0 when done)
+# ═══════════════════════════════════════════════════════════════════════
+
+  migrate:
+    build:
+      context: ..
+      dockerfile: backend/migrations/Dockerfile
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+    networks: [attackbot-net]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"   # one-shot — must not restart on clean exit
+
+  minio-init:
+    image: minio/mc
+    networks: [attackbot-net]
+    depends_on:
+      minio:
+        condition: service_healthy
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+    entrypoint: >
+      /bin/sh -c "
+      mc alias set local http://minio:9000 $$MINIO_ROOT_USER $$MINIO_ROOT_PASSWORD &&
+      mc mb --ignore-existing local/reports &&
+      mc mb --ignore-existing local/evidence &&
+      mc mb --ignore-existing local/js-assets &&
+      mc mb --ignore-existing local/summaries &&
+      echo 'MinIO buckets initialized successfully'
+      "
+    restart: "no"
+    # CRITICAL: mc anonymous set download is intentionally ABSENT.
+    # All report access MUST go through pre-signed URLs via the Reporter API.
+    # Direct public bucket access is a security violation.
+
+  vault-init:
+    image: hashicorp/vault:1.15
+    networks: [attackbot-net]
+    environment:
+      VAULT_ADDR: "http://vault:8200"
+      VAULT_TOKEN: ${VAULT_DEV_ROOT_TOKEN_ID}
+    depends_on:
+      vault:
+        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+      vault kv put secret/attackbot/platform placeholder=true &&
+      vault kv put secret/attackbot/scanner placeholder=true &&
+      echo 'Vault initialized with placeholder secrets'
+      "
+    restart: "no"
+
+# ═══════════════════════════════════════════════════════════════════════
+# PHASE 3 — CORE SERVICES
+# ═══════════════════════════════════════════════════════════════════════
+
+  scraper:
+    build:
+      context: ..
+      dockerfile: backend/services/scraper/Dockerfile
+    environment:
+      SERVICE_NAME: scraper
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      REDIS_URL: redis://redis:6379/0
+      RABBITMQ_URL: amqp://${RABBITMQ_DEFAULT_USER}:${RABBITMQ_DEFAULT_PASS}@rabbitmq:5672/
+      VAULT_URL: http://vault:8200
+      VAULT_TOKEN: ${VAULT_DEV_ROOT_TOKEN_ID}
+      MINIO_ENDPOINT: minio:9000
+      MINIO_ACCESS_KEY: ${MINIO_ROOT_USER}
+      MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD}
+    networks: [attackbot-net]
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+      minio-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8001/api/v1/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 60s
+    deploy:
+      resources:
+        limits: { cpus: "0.5", memory: "512M" }
+
+  core-engine:
+    build:
+      context: ..
+      dockerfile: backend/services/core_engine/Dockerfile
+    environment:
+      SERVICE_NAME: core-engine
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      REDIS_URL: redis://redis:6379/0
+      RABBITMQ_URL: amqp://${RABBITMQ_DEFAULT_USER}:${RABBITMQ_DEFAULT_PASS}@rabbitmq:5672/
+      VAULT_URL: http://vault:8200
+      VAULT_TOKEN: ${VAULT_DEV_ROOT_TOKEN_ID}
+    networks: [attackbot-net]
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8002/api/v1/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 60s
+    deploy:
+      resources:
+        limits: { cpus: "0.5", memory: "512M" }
+
+  reporter:
+    build:
+      context: ..
+      dockerfile: backend/services/reporter/Dockerfile
+    environment:
+      SERVICE_NAME: reporter
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      REDIS_URL: redis://redis:6379/0
+      RABBITMQ_URL: amqp://${RABBITMQ_DEFAULT_USER}:${RABBITMQ_DEFAULT_PASS}@rabbitmq:5672/
+      MINIO_ENDPOINT: minio:9000
+      MINIO_ACCESS_KEY: ${MINIO_ROOT_USER}
+      MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD}
+    networks: [attackbot-net]
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+      minio-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8003/api/v1/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 60s
+    deploy:
+      resources:
+        limits: { cpus: "0.5", memory: "512M" }
+
+  attack-graph-engine:
+    build:
+      context: ..
+      dockerfile: backend/services/attack_graph_engine/Dockerfile
+    environment:
+      SERVICE_NAME: attack-graph-engine
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      NEO4J_URI: bolt://neo4j:7687
+      NEO4J_USERNAME: neo4j
+      NEO4J_PASSWORD: attackbot
+    networks: [attackbot-net]
+    restart: unless-stopped
+    depends_on:
+      neo4j:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8006/api/v1/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 60s
+    deploy:
+      resources:
+        limits: { cpus: "0.5", memory: "512M" }
+
+# ═══════════════════════════════════════════════════════════════════════
+# PHASE 4 — CORE WORKERS
+# ═══════════════════════════════════════════════════════════════════════
+
+  core-worker:
+    build:
+      context: ..
+      dockerfile: backend/services/core_engine/Dockerfile
+    command: >
+      celery -A backend.services.core_engine.worker worker
+      -Q scan.jobs -c 2 --loglevel=info
+    environment:
+      SERVICE_NAME: core-worker
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      REDIS_URL: redis://redis:6379/0
+      RABBITMQ_URL: amqp://${RABBITMQ_DEFAULT_USER}:${RABBITMQ_DEFAULT_PASS}@rabbitmq:5672/
+    networks: [attackbot-net]
+    restart: unless-stopped
+    depends_on:
+      core-engine:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits: { cpus: "2.0", memory: "2G" }
+
+  reporter-worker:
+    build:
+      context: ..
+      dockerfile: backend/services/reporter/Dockerfile
+    command: >
+      celery -A backend.services.reporter.worker worker
+      -Q report.jobs -c 1 --loglevel=info
+    environment:
+      SERVICE_NAME: reporter-worker
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      REDIS_URL: redis://redis:6379/0
+      RABBITMQ_URL: amqp://${RABBITMQ_DEFAULT_USER}:${RABBITMQ_DEFAULT_PASS}@rabbitmq:5672/
+      MINIO_ENDPOINT: minio:9000
+      MINIO_ACCESS_KEY: ${MINIO_ROOT_USER}
+      MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD}
+    networks: [attackbot-net]
+    restart: unless-stopped
+    depends_on:
+      reporter:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits: { cpus: "1.0", memory: "1G" }
+
+# ═══════════════════════════════════════════════════════════════════════
+# PHASE 5 — SPECIALIST WORKERS (skeletons in M1 — no real work yet)
+# ═══════════════════════════════════════════════════════════════════════
+
+  browser-worker:
+    build:
+      context: ..
+      dockerfile: backend/services/browser_worker/Dockerfile
+    command: >
+      celery -A backend.services.browser_worker.worker worker
+      -Q browser.jobs -c 2 --loglevel=info
+    environment:
+      SERVICE_NAME: browser-worker
+      REDIS_URL: redis://redis:6379/0
+      RABBITMQ_URL: amqp://${RABBITMQ_DEFAULT_USER}:${RABBITMQ_DEFAULT_PASS}@rabbitmq:5672/
+    networks: [attackbot-net]
+    restart: unless-stopped
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits: { cpus: "2.0", memory: "2G" }
+
+  api-fuzzer-worker:
+    build:
+      context: ..
+      dockerfile: backend/services/api_fuzzer_worker/Dockerfile
+    command: >
+      celery -A backend.services.api_fuzzer_worker.worker worker
+      -Q api.fuzz.jobs -c 1 --loglevel=info
+    environment:
+      SERVICE_NAME: api-fuzzer-worker
+      REDIS_URL: redis://redis:6379/0
+      RABBITMQ_URL: amqp://${RABBITMQ_DEFAULT_USER}:${RABBITMQ_DEFAULT_PASS}@rabbitmq:5672/
+    networks: [attackbot-net]
+    restart: unless-stopped
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits: { cpus: "1.0", memory: "1G" }
+
+  js-analysis-worker:
+    build:
+      context: ..
+      dockerfile: backend/services/js_analysis_worker/Dockerfile
+    command: >
+      celery -A backend.services.js_analysis_worker.worker worker
+      -Q js.analysis.jobs -c 1 --loglevel=info
+    environment:
+      SERVICE_NAME: js-analysis-worker
+      REDIS_URL: redis://redis:6379/0
+      RABBITMQ_URL: amqp://${RABBITMQ_DEFAULT_USER}:${RABBITMQ_DEFAULT_PASS}@rabbitmq:5672/
+    networks: [attackbot-net]
+    restart: unless-stopped
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits: { cpus: "1.0", memory: "1G" }
+
+  scenario-runner:
+    build:
+      context: ..
+      dockerfile: backend/services/scenario_runner/Dockerfile
+    command: >
+      celery -A backend.services.scenario_runner.worker worker
+      -Q scenario.jobs -c 1 --loglevel=info
+    environment:
+      SERVICE_NAME: scenario-runner
+      REDIS_URL: redis://redis:6379/0
+      RABBITMQ_URL: amqp://${RABBITMQ_DEFAULT_USER}:${RABBITMQ_DEFAULT_PASS}@rabbitmq:5672/
+    networks: [attackbot-net]
+    restart: unless-stopped
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits: { cpus: "1.0", memory: "1G" }
+
+  exploit-verifier:
+    build:
+      context: ..
+      dockerfile: backend/services/exploit_verifier/Dockerfile
+    command: >
+      celery -A backend.services.exploit_verifier.worker worker
+      -Q verify.jobs -c 2 --loglevel=info
+    environment:
+      SERVICE_NAME: exploit-verifier
+      REDIS_URL: redis://redis:6379/0
+      RABBITMQ_URL: amqp://${RABBITMQ_DEFAULT_USER}:${RABBITMQ_DEFAULT_PASS}@rabbitmq:5672/
+    networks: [attackbot-net]
+    restart: unless-stopped
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits: { cpus: "2.0", memory: "2G" }
+
+  ai-analysis-worker:
+    build:
+      context: ..
+      dockerfile: backend/services/ai_analysis_worker/Dockerfile
+    command: >
+      celery -A backend.services.ai_analysis_worker.worker worker
+      -Q ai.analysis.jobs -c 1 --loglevel=info
+    environment:
+      SERVICE_NAME: ai-analysis-worker
+      REDIS_URL: redis://redis:6379/0
+      RABBITMQ_URL: amqp://${RABBITMQ_DEFAULT_USER}:${RABBITMQ_DEFAULT_PASS}@rabbitmq:5672/
+    networks: [attackbot-net]
+    restart: unless-stopped
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits: { cpus: "1.0", memory: "1G" }
+
+# ═══════════════════════════════════════════════════════════════════════
+# PHASE 6 — GATEWAY (last to start — waits for all Phase 3 services)
+# ═══════════════════════════════════════════════════════════════════════
+
+  api-gateway:
+    build:
+      context: ..
+      dockerfile: backend/services/api_gateway/Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      SERVICE_NAME: api-gateway
+      SCRAPER_URL: http://scraper:8001
+      ENGINE_URL: http://core-engine:8002
+      REPORTER_URL: http://reporter:8003
+      GRAPH_URL: http://attack-graph-engine:8006
+      REDIS_URL: redis://redis:6379/0
+    networks: [attackbot-net]
+    restart: unless-stopped
+    depends_on:
+      scraper:
+        condition: service_healthy
+      core-engine:
+        condition: service_healthy
+      reporter:
+        condition: service_healthy
+      attack-graph-engine:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/v1/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 60s
+    deploy:
+      resources:
+        limits: { cpus: "0.5", memory: "256M" }
+
+# ═══════════════════════════════════════════════════════════════════════
+# OBSERVABILITY
+# ═══════════════════════════════════════════════════════════════════════
+
+  prometheus:
+    image: prom/prometheus:latest
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    networks: [attackbot-net]
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits: { cpus: "0.5", memory: "512M" }
+
+  grafana:
+    image: grafana/grafana:latest
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - grafana_data:/var/lib/grafana
+    ports:
+      - "3000:3000"
+    networks: [attackbot-net]
+    restart: unless-stopped
+    depends_on:
+      - prometheus
+    deploy:
+      resources:
+        limits: { cpus: "0.5", memory: "256M" }
+
+  loki:
+    image: grafana/loki:latest
+    volumes:
+      - ./loki/loki-config.yml:/etc/loki/local-config.yaml:ro
+      - loki_data:/loki
+    networks: [attackbot-net]
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits: { cpus: "0.5", memory: "256M" }
+
+  tempo:
+    image: grafana/tempo:latest
+    networks: [attackbot-net]
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits: { cpus: "0.5", memory: "256M" }
