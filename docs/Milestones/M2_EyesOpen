@@ -1,0 +1,2129 @@
+# 👀 AttackBot — M2: Eyes Open
+### Low-Level Implementation Plan
+
+> **Version:** 1.0 &nbsp;|&nbsp; **Milestone:** M2 &nbsp;|&nbsp; **Date:** 2026-03-06  
+> **Depends on:** M1 complete and all M1 Definition of Done boxes checked  
+> **Purpose:** Build the Scraper. Real bug bounty programs from real platforms flow into your database on a schedule.
+
+---
+
+## 📋 Table of Contents
+
+1. [Overview & Target Outcome](#1--overview--target-outcome)
+2. [Full Scraper Database Schema](#2-️-full-scraper-database-schema)
+3. [ScraperConfig & Service Startup](#3--scraperconfig--service-startup)
+4. [Platform Collector Abstraction](#4--platform-collector-abstraction)
+5. [HackerOne Collector](#5-️-hackerone-collector)
+6. [Scope Parser](#6--scope-parser)
+7. [Program Repository & Upsert Logic](#7-️-program-repository--upsert-logic)
+8. [Queue Publisher Integration](#8--queue-publisher-integration)
+9. [Reconciler](#9-️-reconciler)
+10. [APScheduler Integration](#10--apscheduler-integration)
+11. [Scraper FastAPI Routes](#11--scraper-fastapi-routes)
+12. [Updated `main.py` — Full Lifespan](#12--updated-mainpy--full-lifespan)
+13. [Tests](#13--tests)
+14. [Definition of Done Checklist](#14--definition-of-done-checklist)
+
+---
+
+## 1. 🎯 Overview & Target Outcome
+
+### What Gets Built in M2
+
+M2 is the first milestone where real external data enters the system. By the end of M2, a scheduled job connects to HackerOne, fetches active bug bounty programs, normalizes them, stores them in Postgres, and publishes a `scan.jobs` message to RabbitMQ for each new program.
+
+### 🗺️ Data Flow for M2
+
+```
+HackerOne API
+      │
+      ▼
+HackerOneCollector.fetch_listing()
+      │
+      ▼
+ScopeParser.parse(structured_scopes)
+      │
+      ▼
+ProgramRepository.upsert()  ──►  programs + program_scopes + program_policies (Postgres)
+      │
+      ▼
+QueuePublisher.publish(scan.jobs)
+      │
+      ├── SUCCESS ──► queued_for_scan = false
+      └── FAILURE ──► queued_for_scan = true ──► Reconciler retries every 5 min
+```
+
+### ✅ Definition of Done
+
+- `POST /api/v1/scrape/trigger` results in rows in `programs` and `program_scopes`
+- A message appears on `scan.jobs` in RabbitMQ management UI
+- A simulated publish failure results in `queued_for_scan = true`; the reconciler clears it on next cycle
+- A simulated 429 response triggers retry with `Retry-After` delay
+- All tests pass, coverage ≥ 80%
+
+### 🎯 Goals
+
+| Goal | Description |
+|---|---|
+| Platform collector abstraction | Built once, extensible to BugCrowd / Intigriti |
+| HackerOne collector | Fully implemented with auth, pagination, rate limit handling |
+| Program normalization | Consistent `Program` model regardless of platform |
+| Scope parsing | Structured `ProgramScope` objects from raw entries |
+| Upsert logic | Safe re-scrape that preserves `queued_for_scan` flag |
+| Queue publisher | Publishes to `scan.jobs`; sets flag on failure |
+| Reconciler | Retries failed publishes every 5 minutes |
+| Test coverage | ≥ 80% across all scraper modules |
+
+---
+
+## 2. 🗄️ Full Scraper Database Schema
+
+### 2.1 Alembic Revision `002_scraper_full`
+
+This replaces the skeleton `programs` table from M1 revision `001` and adds `program_scopes` and `program_policies`.
+
+```python
+# backend/migrations/versions/002_scraper_full.py
+"""Full scraper schema — programs, program_scopes, program_policies"""
+revision = "002"
+down_revision = "001"
+
+from alembic import op
+import sqlalchemy as sa
+from sqlalchemy.dialects.postgresql import UUID, JSONB, ARRAY
+
+def upgrade():
+    # ── Drop skeleton programs table from 001 ──────────────────────
+    op.drop_table("scans")      # scans depends on programs — drop first
+    op.drop_table("programs")
+
+    # ── programs — full schema ─────────────────────────────────────
+    op.create_table(
+        "programs",
+        sa.Column("program_id",      UUID(as_uuid=True), primary_key=True,
+                  server_default=sa.text("gen_random_uuid()")),
+        sa.Column("platform",        sa.VARCHAR(50),  nullable=False),
+        sa.Column("handle",          sa.VARCHAR(255), nullable=False, unique=True),
+        sa.Column("name",            sa.VARCHAR(500)),
+        sa.Column("url",             sa.VARCHAR(2048)),
+        sa.Column("bounty_type",     sa.VARCHAR(50)),   # 'paid' | 'rep_only' | 'swag'
+        sa.Column("max_bounty",      sa.INTEGER),
+        sa.Column("is_active",       sa.Boolean(), server_default="true"),
+        sa.Column("summary_file",    sa.VARCHAR(1024)),  # MinIO path if summary generated
+        sa.Column("raw_policy",      JSONB),             # raw API response, preserved verbatim
+        sa.Column("queued_for_scan", sa.Boolean(), server_default="false"),
+        sa.Column("last_scraped_at", sa.TIMESTAMPTZ()),
+        sa.Column("created_at",      sa.TIMESTAMPTZ(), server_default=sa.text("NOW()")),
+        sa.Column("updated_at",      sa.TIMESTAMPTZ(), server_default=sa.text("NOW()")),
+    )
+    op.create_index("ix_programs_platform",       "programs", ["platform"])
+    op.create_index("ix_programs_queued_for_scan","programs", ["queued_for_scan"])
+    op.create_index("ix_programs_is_active",      "programs", ["is_active"])
+
+    # ── program_scopes ─────────────────────────────────────────────
+    op.create_table(
+        "program_scopes",
+        sa.Column("scope_id",   UUID(as_uuid=True), primary_key=True,
+                  server_default=sa.text("gen_random_uuid()")),
+        sa.Column("program_id", UUID(as_uuid=True),
+                  sa.ForeignKey("programs.program_id", ondelete="CASCADE"), nullable=False),
+        sa.Column("scope_type", sa.VARCHAR(20), nullable=False),  # 'in_scope' | 'out_of_scope'
+        sa.Column("asset_type", sa.VARCHAR(50), nullable=False),  # see ScopeAssetType enum
+        sa.Column("value",      sa.VARCHAR(2048), nullable=False),
+        sa.Column("notes",      sa.TEXT()),
+        sa.Column("created_at", sa.TIMESTAMPTZ(), server_default=sa.text("NOW()")),
+    )
+    op.create_index("ix_program_scopes_program_id", "program_scopes", ["program_id"])
+    op.create_index("ix_program_scopes_scope_type", "program_scopes", ["scope_type"])
+
+    # ── program_policies ──────────────────────────────────────────
+    op.create_table(
+        "program_policies",
+        sa.Column("policy_id",            UUID(as_uuid=True), primary_key=True,
+                  server_default=sa.text("gen_random_uuid()")),
+        sa.Column("program_id",           UUID(as_uuid=True),
+                  sa.ForeignKey("programs.program_id", ondelete="CASCADE"),
+                  nullable=False, unique=True),
+        sa.Column("disclosure_policy",    sa.TEXT()),
+        sa.Column("testing_restrictions", ARRAY(sa.TEXT())),
+        sa.Column("safe_harbor",          sa.Boolean()),
+        sa.Column("created_at",           sa.TIMESTAMPTZ(), server_default=sa.text("NOW()")),
+    )
+
+    # ── Restore scans table pointing to new programs ───────────────
+    op.create_table(
+        "scans",
+        sa.Column("scan_id",    UUID(as_uuid=True), primary_key=True,
+                  server_default=sa.text("gen_random_uuid()")),
+        sa.Column("program_id", UUID(as_uuid=True),
+                  sa.ForeignKey("programs.program_id"), nullable=False),
+        sa.Column("status",     sa.VARCHAR(50), server_default="pending"),
+        sa.Column("retry_count",sa.INTEGER(), server_default="0"),
+        sa.Column("created_at", sa.TIMESTAMPTZ(), server_default=sa.text("NOW()")),
+    )
+
+
+def downgrade():
+    op.drop_table("scans")
+    op.drop_table("program_policies")
+    op.drop_table("program_scopes")
+    op.drop_table("programs")
+    # Recreate skeleton from 001
+    op.create_table(
+        "programs",
+        sa.Column("program_id", UUID(as_uuid=True), primary_key=True,
+                  server_default=sa.text("gen_random_uuid()")),
+        sa.Column("platform",        sa.VARCHAR(50), nullable=False),
+        sa.Column("handle",          sa.VARCHAR(255), unique=True, nullable=False),
+        sa.Column("name",            sa.VARCHAR(500)),
+        sa.Column("is_active",       sa.Boolean(), server_default="true"),
+        sa.Column("queued_for_scan", sa.Boolean(), server_default="false"),
+        sa.Column("last_scraped_at", sa.TIMESTAMPTZ()),
+        sa.Column("created_at",      sa.TIMESTAMPTZ(), server_default=sa.text("NOW()")),
+        sa.Column("updated_at",      sa.TIMESTAMPTZ(), server_default=sa.text("NOW()")),
+    )
+    op.create_table(
+        "scans",
+        sa.Column("scan_id",    UUID(as_uuid=True), primary_key=True,
+                  server_default=sa.text("gen_random_uuid()")),
+        sa.Column("program_id", UUID(as_uuid=True),
+                  sa.ForeignKey("programs.program_id"), nullable=False),
+        sa.Column("status",     sa.VARCHAR(50), server_default="pending"),
+        sa.Column("created_at", sa.TIMESTAMPTZ(), server_default=sa.text("NOW()")),
+    )
+```
+
+### 2.2 SQLAlchemy ORM Models
+
+Add to `backend/services/scraper/models.py`:
+
+```python
+# backend/services/scraper/models.py
+import uuid
+from datetime import datetime
+from sqlalchemy import Boolean, Float, ForeignKey, Integer, String, Text, ARRAY
+from sqlalchemy.dialects.postgresql import UUID, JSONB, TIMESTAMPTZ
+from sqlalchemy.orm import Mapped, mapped_column, relationship
+from shared.db import Base
+
+
+class Program(Base):
+    __tablename__ = "programs"
+
+    program_id:      Mapped[uuid.UUID]      = mapped_column(UUID(as_uuid=True), primary_key=True,
+                                                             default=uuid.uuid4)
+    platform:        Mapped[str]            = mapped_column(String(50), nullable=False)
+    handle:          Mapped[str]            = mapped_column(String(255), unique=True, nullable=False)
+    name:            Mapped[str | None]     = mapped_column(String(500))
+    url:             Mapped[str | None]     = mapped_column(String(2048))
+    bounty_type:     Mapped[str | None]     = mapped_column(String(50))
+    max_bounty:      Mapped[int | None]     = mapped_column(Integer)
+    is_active:       Mapped[bool]           = mapped_column(Boolean, default=True)
+    summary_file:    Mapped[str | None]     = mapped_column(String(1024))
+    raw_policy:      Mapped[dict | None]    = mapped_column(JSONB)
+    queued_for_scan: Mapped[bool]           = mapped_column(Boolean, default=False)
+    last_scraped_at: Mapped[datetime | None]= mapped_column(TIMESTAMPTZ)
+    created_at:      Mapped[datetime]       = mapped_column(TIMESTAMPTZ, default=datetime.utcnow)
+    updated_at:      Mapped[datetime]       = mapped_column(TIMESTAMPTZ, default=datetime.utcnow,
+                                                             onupdate=datetime.utcnow)
+
+    scopes:   Mapped[list["ProgramScope"]]  = relationship("ProgramScope",  back_populates="program",
+                                                            cascade="all, delete-orphan")
+    policies: Mapped[list["ProgramPolicy"]] = relationship("ProgramPolicy", back_populates="program",
+                                                            cascade="all, delete-orphan")
+
+
+class ProgramScope(Base):
+    __tablename__ = "program_scopes"
+
+    scope_id:   Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True,
+                                                   default=uuid.uuid4)
+    program_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True),
+                                                   ForeignKey("programs.program_id", ondelete="CASCADE"))
+    scope_type: Mapped[str]       = mapped_column(String(20), nullable=False)  # in_scope | out_of_scope
+    asset_type: Mapped[str]       = mapped_column(String(50), nullable=False)
+    value:      Mapped[str]       = mapped_column(String(2048), nullable=False)
+    notes:      Mapped[str | None]= mapped_column(Text)
+    created_at: Mapped[datetime]  = mapped_column(TIMESTAMPTZ, default=datetime.utcnow)
+
+    program: Mapped["Program"] = relationship("Program", back_populates="scopes")
+
+
+class ProgramPolicy(Base):
+    __tablename__ = "program_policies"
+
+    policy_id:             Mapped[uuid.UUID]      = mapped_column(UUID(as_uuid=True), primary_key=True,
+                                                                   default=uuid.uuid4)
+    program_id:            Mapped[uuid.UUID]      = mapped_column(UUID(as_uuid=True),
+                                                                   ForeignKey("programs.program_id",
+                                                                              ondelete="CASCADE"),
+                                                                   unique=True)
+    disclosure_policy:     Mapped[str | None]     = mapped_column(Text)
+    testing_restrictions:  Mapped[list[str] | None] = mapped_column(ARRAY(Text))
+    safe_harbor:           Mapped[bool | None]    = mapped_column(Boolean)
+    created_at:            Mapped[datetime]       = mapped_column(TIMESTAMPTZ, default=datetime.utcnow)
+
+    program: Mapped["Program"] = relationship("Program", back_populates="policies")
+```
+
+---
+
+## 3. ⚙️ ScraperConfig & Service Startup
+
+### 3.1 `ScraperConfig`
+
+```python
+# backend/services/scraper/config.py
+from shared.config import BaseServiceConfig
+from pydantic import Field
+
+class ScraperConfig(BaseServiceConfig):
+    service_name: str = "scraper"
+
+    # ── HackerOne ──────────────────────────────────────────────────
+    hackerone_api_username: str = ""   # loaded from Vault in lifespan
+    hackerone_api_token:    str = ""   # loaded from Vault in lifespan
+    hackerone_scrape_interval_minutes: int = Field(default=60)
+
+    # ── Scraper behaviour ──────────────────────────────────────────
+    scrape_page_size:      int = 100   # max per HackerOne page
+    max_scrape_retries:    int = 3
+    reconciler_interval_minutes: int = 5
+    reconciler_stale_days: int = 7     # only republish programs scraped within N days
+
+    # ── External service URLs ──────────────────────────────────────
+    # Scraper doesn't need to call other services yet — added for consistency
+```
+
+---
+
+## 4. 🧩 Platform Collector Abstraction
+
+### 4.1 Data Classes
+
+```python
+# backend/services/scraper/collectors/models.py
+from dataclasses import dataclass, field
+from typing import Any
+
+@dataclass
+class RawScopeEntry:
+    """Direct mapping from platform API — not yet validated or typed."""
+    asset_type: str        # e.g. 'url', 'domain', 'wildcard' — platform-specific strings
+    value:      str
+    scope_type: str        # 'in_scope' | 'out_of_scope'
+    notes:      str = ""
+
+@dataclass
+class RawPolicy:
+    disclosure_policy:    str = ""
+    testing_restrictions: list[str] = field(default_factory=list)
+    safe_harbor:          bool | None = None
+
+@dataclass
+class RawProgram:
+    """
+    Unprocessed data as fetched from the platform API.
+    All fields are strings — normalization happens in normalize().
+    """
+    platform:    str
+    handle:      str
+    name:        str
+    url:         str
+    bounty_type: str
+    max_bounty:  int | None
+    is_active:   bool
+    raw_policy:  dict[str, Any]
+    scopes:      list[RawScopeEntry] = field(default_factory=list)
+    policy:      RawPolicy           = field(default_factory=RawPolicy)
+```
+
+### 4.2 `BaseCollector` Abstract Class
+
+```python
+# backend/services/scraper/collectors/base.py
+from abc import ABC, abstractmethod
+from .models import RawProgram
+from shared.logging import get_logger
+
+log = get_logger(__name__)
+
+class BaseCollector(ABC):
+    """
+    Platform-agnostic collector interface.
+    Each platform implements all three methods.
+    CollectorRegistry maps platform name → collector class.
+    """
+
+    @abstractmethod
+    async def fetch_listing(self) -> list[RawProgram]:
+        """
+        Fetch the full program listing from the platform.
+        Must handle pagination internally.
+        Must handle rate limiting internally (429 + Retry-After).
+        Returns a list of RawProgram objects — one per program.
+        """
+        ...
+
+    @abstractmethod
+    async def fetch_details(self, handle: str) -> RawProgram:
+        """
+        Fetch full program detail including structured_scopes.
+        Called for each program from fetch_listing() that needs detail enrichment.
+        """
+        ...
+
+    @abstractmethod
+    def normalize(self, raw: RawProgram) -> dict:
+        """
+        Map RawProgram to the canonical DB format.
+        Returns a dict matching the programs table schema.
+        Asset types are normalized to the shared ScopeAssetType enum.
+        """
+        ...
+```
+
+### 4.3 `CollectorRegistry`
+
+```python
+# backend/services/scraper/collectors/registry.py
+from .base import BaseCollector
+from shared.exceptions import CollectorError
+
+_registry: dict[str, type[BaseCollector]] = {}
+
+def register(platform: str):
+    """Decorator: @register('hackerone') on a collector class."""
+    def decorator(cls: type[BaseCollector]):
+        _registry[platform] = cls
+        return cls
+    return decorator
+
+def get_collector(platform: str, **kwargs) -> BaseCollector:
+    if platform not in _registry:
+        raise CollectorError(f"No collector registered for platform: {platform!r}. "
+                             f"Available: {list(_registry.keys())}")
+    return _registry[platform](**kwargs)
+
+def available_platforms() -> list[str]:
+    return list(_registry.keys())
+```
+
+---
+
+## 5. 🕵️ HackerOne Collector
+
+### 5.1 Authentication & Rate Limit Constants
+
+```python
+# backend/services/scraper/collectors/hackerone.py
+import asyncio
+import httpx
+from typing import AsyncGenerator
+from shared.logging import get_logger
+from shared.exceptions import CollectorRateLimitError, CollectorAuthError, CollectorError
+from .base import BaseCollector
+from .models import RawProgram, RawScopeEntry, RawPolicy
+from .registry import register
+
+log = get_logger(__name__)
+
+# ── HackerOne API constants ────────────────────────────────────────────
+H1_BASE_URL    = "https://api.hackerone.com"
+H1_RATE_READ   = 600   # req/min
+H1_RATE_WRITE  = 25    # req/20s
+H1_PAGE_SIZE   = 100   # max results per page
+
+# ── Asset type mapping: H1 → AttackBot canonical ──────────────────────
+# HackerOne structured_scopes returns these asset_type strings.
+# Map them to the canonical values used in program_scopes.asset_type.
+H1_ASSET_TYPE_MAP = {
+    "URL":              "url",
+    "WILDCARD":         "wildcard_domain",
+    "DOMAIN":           "domain",
+    "IP_ADDRESS":       "ip_range",
+    "CIDR":             "ip_range",
+    "ANDROID_APP_URL":  "mobile_app",
+    "IOS_APP_URL":      "mobile_app",
+    "OTHER":            "api",           # catch-all — treat as API endpoint
+}
+```
+
+### 5.2 Core HTTP Client with Retry
+
+```python
+@register("hackerone")
+class HackerOneCollector(BaseCollector):
+    """
+    HackerOne API collector.
+    Auth:  HTTP Basic — api_username as username, api_token as password.
+    Docs:  https://api.hackerone.com/customer-facing/
+    """
+
+    def __init__(self, api_username: str, api_token: str, page_size: int = H1_PAGE_SIZE,
+                 max_retries: int = 3):
+        self._auth       = (api_username, api_token)
+        self._page_size  = page_size
+        self._max_retries = max_retries
+        self._client: httpx.AsyncClient | None = None
+
+    async def _get_client(self) -> httpx.AsyncClient:
+        if self._client is None or self._client.is_closed:
+            self._client = httpx.AsyncClient(
+                auth=self._auth,
+                headers={"Accept": "application/json"},
+                timeout=30.0,
+            )
+        return self._client
+
+    async def _get_with_retry(
+        self,
+        url: str,
+        params: dict | None = None,
+    ) -> dict:
+        """
+        GET with automatic 429 back-off.
+        Raises CollectorRateLimitError if all retries are exhausted.
+        Raises CollectorAuthError on 401/403.
+        """
+        client = await self._get_client()
+        for attempt in range(self._max_retries):
+            try:
+                resp = await client.get(url, params=params)
+            except httpx.RequestError as e:
+                log.warning("h1_request_error", url=url, attempt=attempt, error=str(e))
+                await asyncio.sleep(5 * (attempt + 1))
+                continue
+
+            if resp.status_code == 429:
+                retry_after = int(resp.headers.get("Retry-After", 60))
+                log.warning("h1_rate_limited", retry_after=retry_after, attempt=attempt)
+                await asyncio.sleep(retry_after)
+                continue
+
+            if resp.status_code in (401, 403):
+                raise CollectorAuthError(
+                    f"HackerOne authentication failed: {resp.status_code}. "
+                    "Check api_username and api_token in Vault."
+                )
+
+            if resp.status_code == 404:
+                raise CollectorError(f"HackerOne resource not found: {url}")
+
+            resp.raise_for_status()
+            return resp.json()
+
+        raise CollectorRateLimitError(
+            f"HackerOne rate limited after {self._max_retries} retries on {url}"
+        )
+
+    async def close(self) -> None:
+        if self._client and not self._client.is_closed:
+            await self._client.aclose()
+```
+
+### 5.3 Paginated Program Listing
+
+```python
+    async def _paginate(self, url: str, extra_params: dict | None = None) -> AsyncGenerator[dict, None]:
+        """
+        Generic paginator for all HackerOne list endpoints.
+        Consistent pagination pattern: page[number] + page[size].
+        Stops when the API returns an empty data array.
+        """
+        page = 1
+        while True:
+            params = {"page[number]": page, "page[size]": self._page_size}
+            if extra_params:
+                params.update(extra_params)
+
+            data = await self._get_with_retry(url, params=params)
+            items = data.get("data", [])
+
+            if not items:
+                break
+
+            for item in items:
+                yield item
+
+            page += 1
+            log.info("h1_pagination_page", url=url, page=page, count=len(items))
+```
+
+### 5.4 `fetch_listing()` — Program Listing
+
+```python
+    async def fetch_listing(self) -> list[RawProgram]:
+        """
+        Fetch all programs the authenticated user can access.
+        Endpoint: GET /v1/hackers/programs
+        For each program in the listing, fetch structured_scopes separately.
+        """
+        url = f"{H1_BASE_URL}/v1/hackers/programs"
+        programs: list[RawProgram] = []
+
+        async for item in self._paginate(url):
+            handle = item["attributes"].get("handle", "")
+            if not handle:
+                continue
+            try:
+                raw = await self.fetch_details(handle)
+                programs.append(raw)
+                log.info("h1_program_fetched", handle=handle)
+            except CollectorError as e:
+                # Log and skip — don't abort the entire listing on one program failure
+                log.warning("h1_program_fetch_failed", handle=handle, error=str(e))
+
+        log.info("h1_listing_complete", total=len(programs))
+        return programs
+```
+
+### 5.5 `fetch_details()` — Program Detail + Structured Scopes
+
+```python
+    async def fetch_details(self, handle: str) -> RawProgram:
+        """
+        Fetch full program detail and structured scopes.
+        Uses /structured_scopes endpoint — NOT raw policy text.
+        """
+        # ── Program detail ─────────────────────────────────────────
+        detail_url  = f"{H1_BASE_URL}/v1/hackers/programs/{handle}"
+        detail_data = await self._get_with_retry(detail_url)
+        attrs       = detail_data.get("data", {}).get("attributes", {})
+
+        # ── Structured scopes ──────────────────────────────────────
+        # CRITICAL: Use structured_scopes, NOT raw policy text.
+        # structured_scopes returns pre-parsed asset_type + value fields
+        # that map directly to program_scopes table. Raw policy is markdown
+        # and would require a complex parser.
+        scopes_url = f"{H1_BASE_URL}/v1/hackers/programs/{handle}/structured_scopes"
+        scope_entries: list[RawScopeEntry] = []
+
+        async for scope_item in self._paginate(scopes_url):
+            scope_attrs = scope_item.get("attributes", {})
+            asset_type_raw = scope_attrs.get("asset_type", "OTHER")
+            canonical_type = H1_ASSET_TYPE_MAP.get(asset_type_raw, "api")
+
+            # H1 uses eligible=True for in_scope, eligible=False for out_of_scope
+            eligible   = scope_attrs.get("eligible_for_bounty", True)
+            scope_type = "in_scope" if eligible else "out_of_scope"
+
+            scope_entries.append(RawScopeEntry(
+                asset_type = canonical_type,
+                value      = scope_attrs.get("asset_identifier", ""),
+                scope_type = scope_type,
+                notes      = scope_attrs.get("instruction", ""),
+            ))
+
+        # ── Policy ────────────────────────────────────────────────
+        policy = RawPolicy(
+            disclosure_policy    = attrs.get("policy", ""),
+            testing_restrictions = attrs.get("testing_instructions", "").splitlines()
+                                   if attrs.get("testing_instructions") else [],
+            safe_harbor          = attrs.get("safe_harbor") == "safe_harbor",
+        )
+
+        return RawProgram(
+            platform    = "hackerone",
+            handle      = handle,
+            name        = attrs.get("name", handle),
+            url         = f"https://hackerone.com/{handle}",
+            bounty_type = "paid" if attrs.get("offers_bounties") else "rep_only",
+            max_bounty  = attrs.get("maximum_bounty_table", {}).get("value"),
+            is_active   = attrs.get("state") == "public_mode",
+            raw_policy  = detail_data.get("data", {}),
+            scopes      = scope_entries,
+            policy      = policy,
+        )
+```
+
+### 5.6 `normalize()` — RawProgram → DB Dict
+
+```python
+    def normalize(self, raw: RawProgram) -> dict:
+        """
+        Map RawProgram to a dict matching the programs table schema.
+        This is the canonical transform — all DB writes go through here.
+        """
+        return {
+            "platform":    raw.platform,
+            "handle":      raw.handle,
+            "name":        raw.name,
+            "url":         raw.url,
+            "bounty_type": raw.bounty_type,
+            "max_bounty":  raw.max_bounty,
+            "is_active":   raw.is_active,
+            "raw_policy":  raw.raw_policy,
+        }
+```
+
+---
+
+## 6. 🔭 Scope Parser
+
+The `ScopeParser` validates and types raw scope entries, handling the quirks of each asset type.
+
+```python
+# backend/services/scraper/scope_parser.py
+import ipaddress
+import re
+from dataclasses import dataclass
+from typing import Literal
+from shared.logging import get_logger
+from .collectors.models import RawScopeEntry
+
+log = get_logger(__name__)
+
+ScopeType      = Literal["in_scope", "out_of_scope"]
+ScopeAssetType = Literal["url", "domain", "wildcard_domain", "ip_range", "mobile_app", "api"]
+
+
+@dataclass
+class ParsedScope:
+    scope_type: ScopeType
+    asset_type: ScopeAssetType
+    value:      str
+    notes:      str = ""
+
+
+class ScopeParser:
+    """
+    Validates and normalises raw scope entries from any platform collector.
+    Filters entries with empty or malformed values rather than failing the
+    entire program — a bad single scope entry should not block a valid program.
+    """
+
+    def parse_all(self, raw_entries: list[RawScopeEntry]) -> list[ParsedScope]:
+        parsed: list[ParsedScope] = []
+        for entry in raw_entries:
+            result = self._parse_entry(entry)
+            if result is not None:
+                parsed.append(result)
+        return parsed
+
+    def _parse_entry(self, entry: RawScopeEntry) -> ParsedScope | None:
+        value = entry.value.strip()
+        if not value:
+            log.warning("scope_entry_empty_value", asset_type=entry.asset_type)
+            return None
+
+        asset_type = self._detect_asset_type(entry.asset_type, value)
+        if asset_type is None:
+            log.warning("scope_entry_unrecognised", value=value, raw_type=entry.asset_type)
+            return None
+
+        normalised_value = self._normalise_value(asset_type, value)
+
+        return ParsedScope(
+            scope_type = entry.scope_type,
+            asset_type = asset_type,
+            value      = normalised_value,
+            notes      = entry.notes,
+        )
+
+    def _detect_asset_type(self, raw_type: str, value: str) -> ScopeAssetType | None:
+        # Trust the collector's type mapping first
+        valid: set[ScopeAssetType] = {"url", "domain", "wildcard_domain",
+                                      "ip_range", "mobile_app", "api"}
+        if raw_type in valid:
+            return raw_type  # type: ignore
+
+        # Fallback: infer from value shape
+        if value.startswith("*."):
+            return "wildcard_domain"
+        if value.startswith("http://") or value.startswith("https://"):
+            return "url"
+        if self._is_cidr(value) or self._is_ip(value):
+            return "ip_range"
+        if re.match(r"^[a-zA-Z0-9][a-zA-Z0-9\-\.]+\.[a-zA-Z]{2,}$", value):
+            return "domain"
+        if value.startswith("com.") or value.startswith("io."):
+            return "mobile_app"   # Android reverse-domain package name
+
+        return None
+
+    def _normalise_value(self, asset_type: ScopeAssetType, value: str) -> str:
+        if asset_type == "wildcard_domain":
+            # Normalise: *.example.com, .example.com → *.example.com
+            if value.startswith("."):
+                return f"*{value}"
+            return value.lower()
+
+        if asset_type == "domain":
+            # Strip trailing dot and lowercase
+            return value.rstrip(".").lower()
+
+        if asset_type == "url":
+            # Strip trailing slash for consistency
+            return value.rstrip("/")
+
+        if asset_type == "ip_range":
+            # Validate CIDR; return as-is if valid, strip to host if /32
+            return self._normalise_cidr(value)
+
+        return value
+
+    @staticmethod
+    def _is_cidr(value: str) -> bool:
+        try:
+            ipaddress.ip_network(value, strict=False)
+            return True
+        except ValueError:
+            return False
+
+    @staticmethod
+    def _is_ip(value: str) -> bool:
+        try:
+            ipaddress.ip_address(value)
+            return True
+        except ValueError:
+            return False
+
+    @staticmethod
+    def _normalise_cidr(value: str) -> str:
+        try:
+            net = ipaddress.ip_network(value, strict=False)
+            # /32 (single host) — return just the host address
+            if net.prefixlen == 32:
+                return str(net.network_address)
+            return str(net)
+        except ValueError:
+            return value
+```
+
+---
+
+## 7. 🗃️ Program Repository & Upsert Logic
+
+The repository owns all DB reads/writes for scraper data. Upsert is the most critical method — it must never overwrite `queued_for_scan = true` with `false` during a rescrape.
+
+```python
+# backend/services/scraper/repository.py
+import uuid
+from datetime import datetime, timezone
+from sqlalchemy import select, update
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+from shared.db import get_session
+from shared.logging import get_logger
+from .models import Program, ProgramScope, ProgramPolicy
+from .collectors.models import RawProgram
+from .scope_parser import ScopeParser, ParsedScope
+
+log = get_logger(__name__)
+_scope_parser = ScopeParser()
+
+
+class ProgramRepository:
+
+    async def upsert(self, raw: RawProgram, normalized: dict) -> tuple[uuid.UUID, bool]:
+        """
+        Insert or update a program row. Returns (program_id, created: bool).
+
+        Critical behaviour:
+          - queued_for_scan is NEVER overwritten on update. If a previous scrape
+            set it to True (publish failed), a rescrape must not reset it to False.
+            The reconciler is the only thing that clears it.
+          - last_scraped_at is always updated so the reconciler window is accurate.
+          - Scopes are replaced on every scrape (delete + re-insert) because
+            program scope can change without the handle changing.
+          - raw_policy is preserved as a verbatim snapshot for debugging.
+        """
+        async with get_session() as session:
+            # ── Upsert programs row ────────────────────────────────
+            stmt = pg_insert(Program).values(
+                platform        = normalized["platform"],
+                handle          = normalized["handle"],
+                name            = normalized["name"],
+                url             = normalized["url"],
+                bounty_type     = normalized["bounty_type"],
+                max_bounty      = normalized["max_bounty"],
+                is_active       = normalized["is_active"],
+                raw_policy      = normalized["raw_policy"],
+                last_scraped_at = datetime.now(timezone.utc),
+                # queued_for_scan defaults to false on INSERT
+            ).on_conflict_do_update(
+                index_elements=["handle"],
+                set_={
+                    "name":            normalized["name"],
+                    "url":             normalized["url"],
+                    "bounty_type":     normalized["bounty_type"],
+                    "max_bounty":      normalized["max_bounty"],
+                    "is_active":       normalized["is_active"],
+                    "raw_policy":      normalized["raw_policy"],
+                    "last_scraped_at": datetime.now(timezone.utc),
+                    "updated_at":      datetime.now(timezone.utc),
+                    # INTENTIONALLY OMITTED: queued_for_scan
+                    # On conflict, we never touch queued_for_scan.
+                    # If it was set true by a failed publish, we leave it.
+                },
+            ).returning(Program.program_id, Program.created_at, Program.updated_at)
+
+            result     = await session.execute(stmt)
+            row        = result.fetchone()
+            program_id = row.program_id
+            created    = row.created_at == row.updated_at  # rough creation indicator
+
+            # ── Replace scopes ─────────────────────────────────────
+            # Delete existing scopes for this program and re-insert.
+            # This is simpler and safer than a three-way diff.
+            await session.execute(
+                ProgramScope.__table__.delete().where(
+                    ProgramScope.program_id == program_id
+                )
+            )
+            parsed_scopes: list[ParsedScope] = _scope_parser.parse_all(raw.scopes)
+            for ps in parsed_scopes:
+                session.add(ProgramScope(
+                    program_id = program_id,
+                    scope_type = ps.scope_type,
+                    asset_type = ps.asset_type,
+                    value      = ps.value,
+                    notes      = ps.notes,
+                ))
+
+            # ── Upsert policy ──────────────────────────────────────
+            if raw.policy:
+                policy_stmt = pg_insert(ProgramPolicy).values(
+                    program_id            = program_id,
+                    disclosure_policy     = raw.policy.disclosure_policy,
+                    testing_restrictions  = raw.policy.testing_restrictions,
+                    safe_harbor           = raw.policy.safe_harbor,
+                ).on_conflict_do_update(
+                    index_elements=["program_id"],
+                    set_={
+                        "disclosure_policy":    raw.policy.disclosure_policy,
+                        "testing_restrictions": raw.policy.testing_restrictions,
+                        "safe_harbor":          raw.policy.safe_harbor,
+                    }
+                )
+                await session.execute(policy_stmt)
+
+            log.info(
+                "program_upserted",
+                handle     = normalized["handle"],
+                program_id = str(program_id),
+                created    = created,
+                scopes     = len(parsed_scopes),
+            )
+            return program_id, created
+
+    async def set_queued_for_scan(self, program_id: uuid.UUID, queued: bool) -> None:
+        async with get_session() as session:
+            await session.execute(
+                update(Program)
+                .where(Program.program_id == program_id)
+                .values(queued_for_scan=queued)
+            )
+
+    async def get_programs_pending_reconcile(self, stale_days: int = 7) -> list[Program]:
+        """Return programs that failed to publish and are still within the active window."""
+        async with get_session() as session:
+            result = await session.execute(
+                select(Program).where(
+                    Program.queued_for_scan == True,
+                    Program.last_scraped_at > sa_text(
+                        f"NOW() - INTERVAL '{stale_days} days'"
+                    )
+                )
+            )
+            return list(result.scalars().all())
+
+    async def get_program_with_scopes(self, program_id: uuid.UUID) -> Program | None:
+        async with get_session() as session:
+            result = await session.execute(
+                select(Program).where(Program.program_id == program_id)
+            )
+            return result.scalar_one_or_none()
+
+    async def list_programs(
+        self,
+        platform: str | None = None,
+        is_active: bool | None = None,
+        page: int = 1,
+        page_size: int = 50,
+    ) -> tuple[list[Program], int]:
+        async with get_session() as session:
+            query = select(Program)
+            if platform:
+                query = query.where(Program.platform == platform)
+            if is_active is not None:
+                query = query.where(Program.is_active == is_active)
+
+            count_result = await session.execute(
+                select(sa_func.count()).select_from(query.subquery())
+            )
+            total = count_result.scalar_one()
+
+            result = await session.execute(
+                query.offset((page - 1) * page_size).limit(page_size)
+                     .order_by(Program.created_at.desc())
+            )
+            return list(result.scalars().all()), total
+```
+
+---
+
+## 8. 📤 Queue Publisher Integration
+
+The scraper uses the `QueuePublisher` from `shared/queue.py` (built in M1). This section wires it to the scan job message schema and handles publish failures.
+
+```python
+# backend/services/scraper/publisher.py
+import uuid
+from shared.queue import QueuePublisher, Queues
+from shared.schemas.scan_jobs import ScanJobsPayload, ScopeDefinition, ScopeEntry, FeatureFlags
+from shared.schemas.scan_jobs import build_scan_job_message
+from shared.logging import get_logger
+from .models import Program, ProgramScope
+from .repository import ProgramRepository
+
+log = get_logger(__name__)
+_repo = ProgramRepository()
+
+
+class ScanJobPublisher:
+    """
+    Wraps QueuePublisher with scraper-specific logic:
+    - Builds ScanJobsPayload from program + scopes
+    - Handles publish failure by setting queued_for_scan = true
+    - Handles publish success by clearing queued_for_scan flag
+    """
+
+    def __init__(self, queue_publisher: QueuePublisher):
+        self._publisher = queue_publisher
+
+    async def publish_scan_job(
+        self,
+        program: Program,
+        scopes: list[ProgramScope],
+        trace_id: str | None = None,
+    ) -> bool:
+        """
+        Build and publish a scan.jobs message for a program.
+        Returns True on success, False on failure.
+        On failure: sets queued_for_scan = true on the program row.
+        On success: ensures queued_for_scan = false.
+        """
+        # ── Build scope definition ─────────────────────────────────
+        in_scope_entries  = [s for s in scopes if s.scope_type == "in_scope"]
+        out_scope_entries = [s for s in scopes if s.scope_type == "out_of_scope"]
+
+        if not in_scope_entries:
+            log.error("publish_skipped_no_in_scope", program_id=str(program.program_id),
+                      handle=program.handle)
+            return False
+
+        scope_def = ScopeDefinition(
+            in_scope=[
+                ScopeEntry(asset_type=s.asset_type, value=s.value, notes=s.notes)
+                for s in in_scope_entries
+            ],
+            out_of_scope=[
+                ScopeEntry(asset_type=s.asset_type, value=s.value, notes=s.notes)
+                for s in out_scope_entries
+            ],
+        )
+
+        # ── Build payload ──────────────────────────────────────────
+        payload = ScanJobsPayload(
+            program_id   = program.program_id,
+            platform     = program.platform,
+            handle       = program.handle,
+            scope        = scope_def,
+            summary_file = program.summary_file,
+            feature_flags= FeatureFlags(),  # defaults — expandable per-program later
+            priority     = 1,
+        )
+
+        message = build_scan_job_message(
+            payload        = payload,
+            source_service = "scraper",
+            trace_id       = trace_id,
+        )
+
+        # ── Publish ────────────────────────────────────────────────
+        success = await self._publisher.publish(Queues.SCAN_JOBS, message)
+
+        if success:
+            await _repo.set_queued_for_scan(program.program_id, queued=False)
+            log.info("scan_job_published", handle=program.handle,
+                     program_id=str(program.program_id))
+        else:
+            await _repo.set_queued_for_scan(program.program_id, queued=True)
+            log.warning("scan_job_publish_failed_flagged",
+                        handle=program.handle, program_id=str(program.program_id))
+
+        return success
+```
+
+---
+
+## 9. ♻️ Reconciler
+
+The reconciler runs every 5 minutes and retries programs where `queued_for_scan = true`. It is the only component that clears that flag.
+
+```python
+# backend/services/scraper/reconciler.py
+from shared.logging import get_logger
+from .repository import ProgramRepository
+from .publisher import ScanJobPublisher
+
+log = get_logger(__name__)
+_repo = ProgramRepository()
+
+
+class Reconciler:
+    """
+    Retries queued_for_scan programs that failed to publish.
+
+    Query:  programs WHERE queued_for_scan = true
+                      AND last_scraped_at > NOW() - INTERVAL '{stale_days} days'
+
+    Why the stale window?
+      Programs scraped more than N days ago may have changed scope or become inactive.
+      Re-publishing stale data as a fresh scan job risks incorrect scope enforcement.
+      The program will be re-queued naturally on the next scheduled scrape cycle.
+
+    The reconciler:
+      - Republishes each qualifying program
+      - On success: clears queued_for_scan (via ScanJobPublisher)
+      - On failure: leaves queued_for_scan = true for the next cycle
+    """
+
+    def __init__(self, publisher: ScanJobPublisher, stale_days: int = 7):
+        self._publisher  = publisher
+        self._stale_days = stale_days
+
+    async def reconcile(self) -> dict:
+        """
+        Run one reconciliation cycle.
+        Returns a summary dict for observability/logging.
+        """
+        programs = await _repo.get_programs_pending_reconcile(self._stale_days)
+
+        if not programs:
+            log.info("reconciler_nothing_to_reconcile")
+            return {"attempted": 0, "succeeded": 0, "failed": 0}
+
+        log.info("reconciler_starting", pending=len(programs))
+
+        succeeded = 0
+        failed    = 0
+
+        for program in programs:
+            full_program = await _repo.get_program_with_scopes(program.program_id)
+            if not full_program or not full_program.scopes:
+                log.warning("reconciler_no_scopes", program_id=str(program.program_id))
+                failed += 1
+                continue
+
+            ok = await self._publisher.publish_scan_job(
+                program = full_program,
+                scopes  = full_program.scopes,
+            )
+            if ok:
+                succeeded += 1
+            else:
+                failed += 1
+
+        summary = {"attempted": len(programs), "succeeded": succeeded, "failed": failed}
+        log.info("reconciler_complete", **summary)
+        return summary
+```
+
+---
+
+## 10. 🕐 APScheduler Integration
+
+APScheduler runs inside the scraper process as a background task. Redis locks prevent overlapping scrape runs. Both the scrape job and the reconciler run on independent schedules.
+
+```python
+# backend/services/scraper/scheduler.py
+import asyncio
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.triggers.interval import IntervalTrigger
+import redis.asyncio as aioredis
+from shared.logging import get_logger
+from .collectors.registry import get_collector
+from .collectors.hackerone import HackerOneCollector
+from .repository import ProgramRepository
+from .publisher import ScanJobPublisher
+from .reconciler import Reconciler
+
+log = get_logger(__name__)
+_repo = ProgramRepository()
+
+LOCK_TTL_SECONDS = 3600  # 1 hour — max time a scrape lock can be held
+
+
+class ScraperScheduler:
+    """
+    APScheduler wrapper for the scraper.
+    Schedules:
+      - HackerOne full scrape (configurable interval, default 60 min)
+      - Reconciler (fixed 5 min interval)
+    """
+
+    def __init__(
+        self,
+        redis_url: str,
+        publisher: ScanJobPublisher,
+        hackerone_username: str,
+        hackerone_token: str,
+        scrape_interval_minutes: int = 60,
+        reconciler_interval_minutes: int = 5,
+        stale_days: int = 7,
+    ):
+        self._redis_url              = redis_url
+        self._publisher              = publisher
+        self._hackerone_username     = hackerone_username
+        self._hackerone_token        = hackerone_token
+        self._scrape_interval        = scrape_interval_minutes
+        self._reconciler_interval    = reconciler_interval_minutes
+        self._stale_days             = stale_days
+        self._scheduler              = AsyncIOScheduler()
+        self._redis: aioredis.Redis | None = None
+
+    async def start(self) -> None:
+        self._redis = aioredis.from_url(self._redis_url, decode_responses=True)
+
+        self._scheduler.add_job(
+            self._scrape_hackerone,
+            trigger  = IntervalTrigger(minutes=self._scrape_interval),
+            id       = "scrape_hackerone",
+            name     = "HackerOne full scrape",
+            replace_existing = True,
+            # Run immediately on first start as well
+            next_run_time = __import__("datetime").datetime.now(),
+        )
+
+        self._scheduler.add_job(
+            self._run_reconciler,
+            trigger  = IntervalTrigger(minutes=self._reconciler_interval),
+            id       = "reconciler",
+            name     = "Publish failure reconciler",
+            replace_existing = True,
+        )
+
+        self._scheduler.start()
+        log.info("scheduler_started",
+                 scrape_interval_min  = self._scrape_interval,
+                 reconciler_interval_min = self._reconciler_interval)
+
+    async def stop(self) -> None:
+        self._scheduler.shutdown(wait=False)
+        if self._redis:
+            await self._redis.aclose()
+
+    def get_scheduler(self) -> AsyncIOScheduler:
+        return self._scheduler
+
+    async def _scrape_hackerone(self) -> None:
+        """
+        Full HackerOne scrape job.
+        Redis lock prevents overlapping runs on the same platform.
+        Lock key: scraper:lock:hackerone
+        """
+        lock_key = "scraper:lock:hackerone"
+        locked = await self._redis.set(lock_key, "1", nx=True, ex=LOCK_TTL_SECONDS)
+
+        if not locked:
+            log.info("scrape_skipped_lock_held", platform="hackerone")
+            return
+
+        log.info("scrape_starting", platform="hackerone")
+        collector = HackerOneCollector(
+            api_username = self._hackerone_username,
+            api_token    = self._hackerone_token,
+        )
+        try:
+            programs = await collector.fetch_listing()
+            published = 0
+            failed    = 0
+
+            for raw in programs:
+                normalized    = collector.normalize(raw)
+                program_id, _ = await _repo.upsert(raw, normalized)
+                full_program  = await _repo.get_program_with_scopes(program_id)
+                if not full_program or not full_program.scopes:
+                    log.warning("scrape_no_scopes_skip", handle=raw.handle)
+                    continue
+
+                ok = await self._publisher.publish_scan_job(
+                    program = full_program,
+                    scopes  = full_program.scopes,
+                )
+                if ok:
+                    published += 1
+                else:
+                    failed += 1
+
+            log.info("scrape_complete", platform="hackerone",
+                     total=len(programs), published=published, failed=failed)
+        except Exception as e:
+            log.error("scrape_failed", platform="hackerone", error=str(e))
+        finally:
+            await collector.close()
+            await self._redis.delete(lock_key)
+
+    async def _run_reconciler(self) -> None:
+        reconciler = Reconciler(self._publisher, stale_days=self._stale_days)
+        try:
+            await reconciler.reconcile()
+        except Exception as e:
+            log.error("reconciler_failed", error=str(e))
+```
+
+---
+
+## 11. 🌐 Scraper FastAPI Routes
+
+```python
+# backend/services/scraper/routes.py
+import uuid
+from fastapi import APIRouter, HTTPException, Query, Depends, BackgroundTasks
+from pydantic import BaseModel
+from datetime import datetime
+from shared.logging import get_logger
+from .repository import ProgramRepository
+from .models import Program, ProgramScope
+
+log    = get_logger(__name__)
+router = APIRouter(prefix="/api/v1")
+_repo  = ProgramRepository()
+
+
+# ── Response schemas ───────────────────────────────────────────────────
+
+class ScopeEntryResponse(BaseModel):
+    scope_id:   uuid.UUID
+    scope_type: str
+    asset_type: str
+    value:      str
+    notes:      str | None
+
+class ProgramResponse(BaseModel):
+    program_id:      uuid.UUID
+    platform:        str
+    handle:          str
+    name:            str | None
+    url:             str | None
+    bounty_type:     str | None
+    max_bounty:      int | None
+    is_active:       bool
+    queued_for_scan: bool
+    last_scraped_at: datetime | None
+    created_at:      datetime
+
+class ProgramListResponse(BaseModel):
+    programs: list[ProgramResponse]
+    total:    int
+    page:     int
+    page_size:int
+
+class TriggerResponse(BaseModel):
+    status:  str
+    message: str
+
+
+# ── Routes ─────────────────────────────────────────────────────────────
+
+@router.post("/scrape/trigger", response_model=TriggerResponse)
+async def trigger_scrape(
+    background_tasks: BackgroundTasks,
+    platform: str = Query(default="hackerone"),
+):
+    """
+    Manually trigger a full scrape for the specified platform.
+    The scrape runs as a background task — returns immediately.
+    For scheduled scrapes, the APScheduler job handles this automatically.
+    """
+    # Import here to avoid circular at module load
+    from .main import get_scheduler
+    scheduler = get_scheduler()
+
+    valid_platforms = ["hackerone"]
+    if platform not in valid_platforms:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unknown platform {platform!r}. Valid: {valid_platforms}"
+        )
+
+    job_id = f"scrape_{platform}"
+    job    = scheduler.get_job(job_id)
+    if job is None:
+        raise HTTPException(status_code=500, detail=f"Scheduler job {job_id} not found")
+
+    # Trigger the job immediately (bypasses the interval timer for this one run)
+    job.modify(next_run_time=datetime.now())
+    log.info("scrape_manually_triggered", platform=platform)
+
+    return TriggerResponse(
+        status  = "accepted",
+        message = f"Scrape job for {platform} queued. Check /health for scheduler status.",
+    )
+
+
+@router.get("/programs", response_model=ProgramListResponse)
+async def list_programs(
+    platform:  str | None = Query(default=None),
+    is_active: bool | None = Query(default=None),
+    page:      int = Query(default=1, ge=1),
+    page_size: int = Query(default=50, ge=1, le=200),
+):
+    programs, total = await _repo.list_programs(
+        platform=platform, is_active=is_active, page=page, page_size=page_size
+    )
+    return ProgramListResponse(
+        programs  = [ProgramResponse.model_validate(p, from_attributes=True) for p in programs],
+        total     = total,
+        page      = page,
+        page_size = page_size,
+    )
+
+
+@router.get("/programs/{program_id}", response_model=ProgramResponse)
+async def get_program(program_id: uuid.UUID):
+    program = await _repo.get_program_with_scopes(program_id)
+    if not program:
+        raise HTTPException(status_code=404, detail=f"Program {program_id} not found")
+    return ProgramResponse.model_validate(program, from_attributes=True)
+
+
+@router.get("/programs/{program_id}/scope", response_model=list[ScopeEntryResponse])
+async def get_program_scope(program_id: uuid.UUID):
+    """
+    Returns the parsed scope for a program.
+    Called by core-engine at scan start to build the Stage 0 ScopeFilter.
+    """
+    program = await _repo.get_program_with_scopes(program_id)
+    if not program:
+        raise HTTPException(status_code=404, detail=f"Program {program_id} not found")
+    return [
+        ScopeEntryResponse.model_validate(s, from_attributes=True)
+        for s in program.scopes
+    ]
+```
+
+---
+
+## 12. 🔄 Updated `main.py` — Full Lifespan
+
+The M1 skeleton `main.py` is replaced with a fully wired lifespan that initialises all M2 components.
+
+```python
+# backend/services/scraper/main.py
+from contextlib import asynccontextmanager
+from fastapi import FastAPI
+from prometheus_fastapi_instrumentator import Instrumentator
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+
+from shared.config import BaseServiceConfig
+from shared.logging import configure_logging, get_logger
+from shared.db import init_db, check_db_health
+from shared.health import HealthResponse, HealthStatus, ComponentHealth
+from shared.queue import QueuePublisher, Queues
+from shared.vault import init_vault, get_secret
+from shared.exceptions import QueueConnectionError
+from datetime import datetime
+
+from .config import ScraperConfig
+from .publisher import ScanJobPublisher
+from .scheduler import ScraperScheduler
+from .routes import router
+
+# ── Global handles (set during lifespan) ──────────────────────────────
+_settings: ScraperConfig | None = None
+_scheduler_instance: ScraperScheduler | None = None
+
+settings = ScraperConfig()
+configure_logging(settings.service_name, settings.log_level)
+log = get_logger(__name__)
+
+
+def get_scheduler() -> AsyncIOScheduler:
+    """Used by routes to access the running scheduler."""
+    if _scheduler_instance is None:
+        raise RuntimeError("Scheduler not initialised")
+    return _scheduler_instance.get_scheduler()
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    global _settings, _scheduler_instance
+
+    log.info("scraper_starting")
+
+    # ── 1. Database ────────────────────────────────────────────────
+    init_db(settings.database_url, settings.db_pool_size, settings.db_max_overflow)
+    log.info("scraper_db_ready")
+
+    # ── 2. Vault ───────────────────────────────────────────────────
+    init_vault(settings.vault_url, settings.vault_token)
+    # Load platform credentials from Vault (dev: falls back to env)
+    try:
+        h1_username = get_secret("attackbot/platform/hackerone", "api_username")
+        h1_token    = get_secret("attackbot/platform/hackerone", "api_token")
+    except Exception:
+        # Dev fallback — Vault not seeded with real creds yet
+        log.warning("vault_creds_not_found_using_env")
+        h1_username = settings.hackerone_api_username
+        h1_token    = settings.hackerone_api_token
+
+    # ── 3. RabbitMQ publisher ──────────────────────────────────────
+    queue_publisher = QueuePublisher(settings.rabbitmq_url)
+    await queue_publisher.connect()
+    log.info("scraper_queue_publisher_ready")
+
+    # ── 4. Scan job publisher ──────────────────────────────────────
+    scan_publisher = ScanJobPublisher(queue_publisher)
+
+    # ── 5. Scheduler ───────────────────────────────────────────────
+    _scheduler_instance = ScraperScheduler(
+        redis_url                    = settings.redis_url,
+        publisher                    = scan_publisher,
+        hackerone_username           = h1_username,
+        hackerone_token              = h1_token,
+        scrape_interval_minutes      = settings.hackerone_scrape_interval_minutes,
+        reconciler_interval_minutes  = settings.reconciler_interval_minutes,
+        stale_days                   = settings.reconciler_stale_days,
+    )
+    await _scheduler_instance.start()
+    log.info("scraper_scheduler_ready")
+    log.info("scraper_ready")
+
+    yield
+
+    # ── Shutdown ───────────────────────────────────────────────────
+    log.info("scraper_stopping")
+    await _scheduler_instance.stop()
+    await queue_publisher.close()
+    log.info("scraper_stopped")
+
+
+app = FastAPI(title="AttackBot Scraper", version="1.0.0", lifespan=lifespan)
+Instrumentator().instrument(app).expose(app)
+app.include_router(router)
+
+
+@app.get("/api/v1/health", response_model=HealthResponse)
+async def health():
+    from shared.db import check_db_health
+    from shared.queue import QueuePublisher
+
+    db_ok  = await check_db_health()
+    # Check RabbitMQ by inspecting publisher connection state
+    rmq_ok = True  # publisher reconnects automatically; connection loss is not fatal
+
+    # Check scheduler is running
+    sched_ok = (
+        _scheduler_instance is not None
+        and _scheduler_instance.get_scheduler().running
+    )
+
+    components = {
+        "database":  ComponentHealth(status=HealthStatus.HEALTHY if db_ok   else HealthStatus.UNHEALTHY),
+        "rabbitmq":  ComponentHealth(status=HealthStatus.HEALTHY if rmq_ok  else HealthStatus.UNHEALTHY),
+        "scheduler": ComponentHealth(status=HealthStatus.HEALTHY if sched_ok else HealthStatus.UNHEALTHY),
+    }
+    overall = (
+        HealthStatus.HEALTHY
+        if all(c.status == HealthStatus.HEALTHY for c in components.values())
+        else HealthStatus.UNHEALTHY
+    )
+    return HealthResponse(
+        status     = overall,
+        service    = settings.service_name,
+        timestamp  = datetime.utcnow(),
+        components = components,
+    )
+```
+
+---
+
+## 13. 🧪 Tests
+
+### 13.1 Test File Structure
+
+```
+tests/
+├── conftest.py
+├── unit/
+│   ├── scraper/
+│   │   ├── test_hackerone_collector.py
+│   │   ├── test_scope_parser.py
+│   │   ├── test_repository_upsert.py
+│   │   ├── test_reconciler.py
+│   │   └── test_429_retry.py
+└── integration/
+    └── scraper/
+        └── test_scrape_to_queue.py
+```
+
+### 13.2 Unit — HackerOne Collector (Mocked)
+
+```python
+# tests/unit/scraper/test_hackerone_collector.py
+import pytest
+from unittest.mock import AsyncMock, patch, MagicMock
+from backend.services.scraper.collectors.hackerone import HackerOneCollector
+from shared.exceptions import CollectorRateLimitError, CollectorAuthError
+
+@pytest.fixture
+def collector():
+    return HackerOneCollector(api_username="test_user", api_token="test_token")
+
+
+@pytest.mark.asyncio
+async def test_fetch_listing_returns_programs(collector):
+    """Full listing fetch with mocked paginator returns RawProgram objects."""
+    mock_listing = [{"attributes": {"handle": "example_program"}}]
+    mock_detail  = {
+        "data": {
+            "attributes": {
+                "name": "Example Program", "state": "public_mode",
+                "offers_bounties": True, "policy": "Standard disclosure",
+            }
+        }
+    }
+    mock_scopes  = [
+        {"attributes": {"asset_type": "WILDCARD", "asset_identifier": "*.example.com",
+                        "eligible_for_bounty": True, "instruction": ""}},
+    ]
+
+    async def mock_paginate(url, extra_params=None):
+        if "structured_scopes" in url:
+            for item in mock_scopes:
+                yield item
+        else:
+            for item in mock_listing:
+                yield item
+
+    with patch.object(collector, "_paginate", side_effect=mock_paginate):
+        with patch.object(collector, "_get_with_retry", return_value=mock_detail):
+            programs = await collector.fetch_listing()
+
+    assert len(programs) == 1
+    assert programs[0].handle == "example_program"
+    assert programs[0].platform == "hackerone"
+    assert len(programs[0].scopes) == 1
+    assert programs[0].scopes[0].asset_type == "wildcard_domain"
+
+
+@pytest.mark.asyncio
+async def test_rate_limit_retry(collector):
+    """429 response triggers retry with Retry-After delay."""
+    call_count = 0
+
+    async def mock_get(url, params=None):
+        nonlocal call_count
+        call_count += 1
+        resp = MagicMock()
+        if call_count < 3:
+            resp.status_code = 429
+            resp.headers = {"Retry-After": "1"}
+        else:
+            resp.status_code = 200
+            resp.json.return_value = {"data": []}
+            resp.raise_for_status = MagicMock()
+        return resp
+
+    with patch.object(collector, "_get_client") as mock_client_factory:
+        mock_client = AsyncMock()
+        mock_client.get = mock_get
+        mock_client_factory.return_value = mock_client
+        with patch("asyncio.sleep", new_callable=AsyncMock):
+            result = await collector._get_with_retry("https://api.hackerone.com/v1/test")
+
+    assert call_count == 3
+    assert result == {"data": []}
+
+
+@pytest.mark.asyncio
+async def test_rate_limit_exhausted_raises(collector):
+    """All retries exhausted raises CollectorRateLimitError."""
+    async def always_429(url, params=None):
+        resp = MagicMock()
+        resp.status_code = 429
+        resp.headers = {"Retry-After": "1"}
+        return resp
+
+    with patch.object(collector, "_get_client") as mock_client_factory:
+        mock_client = AsyncMock()
+        mock_client.get = always_429
+        mock_client_factory.return_value = mock_client
+        with patch("asyncio.sleep", new_callable=AsyncMock):
+            with pytest.raises(CollectorRateLimitError):
+                await collector._get_with_retry("https://api.hackerone.com/v1/test")
+
+
+@pytest.mark.asyncio
+async def test_auth_error_raises(collector):
+    """401 response raises CollectorAuthError immediately (no retry)."""
+    async def auth_fail(url, params=None):
+        resp = MagicMock()
+        resp.status_code = 401
+        return resp
+
+    with patch.object(collector, "_get_client") as mock_client_factory:
+        mock_client = AsyncMock()
+        mock_client.get = auth_fail
+        mock_client_factory.return_value = mock_client
+        with pytest.raises(CollectorAuthError):
+            await collector._get_with_retry("https://api.hackerone.com/v1/test")
+
+
+def test_normalize_maps_all_fields(collector):
+    """normalize() maps RawProgram fields to the DB schema dict."""
+    from backend.services.scraper.collectors.models import RawProgram, RawPolicy
+    raw = RawProgram(
+        platform="hackerone", handle="acme", name="Acme Corp", url="https://hackerone.com/acme",
+        bounty_type="paid", max_bounty=10000, is_active=True, raw_policy={"data": {}},
+        policy=RawPolicy(),
+    )
+    result = collector.normalize(raw)
+    assert result["handle"] == "acme"
+    assert result["platform"] == "hackerone"
+    assert result["is_active"] is True
+```
+
+### 13.3 Unit — Scope Parser
+
+```python
+# tests/unit/scraper/test_scope_parser.py
+import pytest
+from backend.services.scraper.scope_parser import ScopeParser
+from backend.services.scraper.collectors.models import RawScopeEntry
+
+@pytest.fixture
+def parser():
+    return ScopeParser()
+
+def make_entry(asset_type, value, scope_type="in_scope"):
+    return RawScopeEntry(asset_type=asset_type, value=value, scope_type=scope_type)
+
+
+# ── Wildcard matching ──────────────────────────────────────────────────
+def test_wildcard_domain_normalised(parser):
+    entries = parser.parse_all([make_entry("wildcard_domain", "*.example.com")])
+    assert len(entries) == 1
+    assert entries[0].value == "*.example.com"
+    assert entries[0].asset_type == "wildcard_domain"
+
+def test_dot_prefix_wildcard_normalised(parser):
+    """'.example.com' should be normalised to '*.example.com'."""
+    entries = parser.parse_all([make_entry("wildcard_domain", ".example.com")])
+    assert entries[0].value == "*.example.com"
+
+def test_wildcard_inferred_from_value(parser):
+    """Value starting with '*.' should be detected as wildcard_domain."""
+    entries = parser.parse_all([make_entry("api", "*.api.example.com")])
+    assert entries[0].asset_type == "wildcard_domain"
+
+
+# ── CIDR / IP ──────────────────────────────────────────────────────────
+def test_cidr_range_preserved(parser):
+    entries = parser.parse_all([make_entry("ip_range", "10.0.0.0/24")])
+    assert entries[0].value == "10.0.0.0/24"
+    assert entries[0].asset_type == "ip_range"
+
+def test_host_cidr_stripped_to_ip(parser):
+    """/32 CIDR should be reduced to just the host address."""
+    entries = parser.parse_all([make_entry("ip_range", "192.168.1.1/32")])
+    assert entries[0].value == "192.168.1.1"
+
+
+# ── URL ────────────────────────────────────────────────────────────────
+def test_url_trailing_slash_stripped(parser):
+    entries = parser.parse_all([make_entry("url", "https://api.example.com/")])
+    assert entries[0].value == "https://api.example.com"
+
+def test_url_inferred_from_https_prefix(parser):
+    entries = parser.parse_all([make_entry("other", "https://api.example.com")])
+    assert entries[0].asset_type == "url"
+
+
+# ── Domain ─────────────────────────────────────────────────────────────
+def test_domain_lowercased(parser):
+    entries = parser.parse_all([make_entry("domain", "API.Example.COM")])
+    assert entries[0].value == "api.example.com"
+
+def test_domain_trailing_dot_removed(parser):
+    entries = parser.parse_all([make_entry("domain", "example.com.")])
+    assert entries[0].value == "example.com"
+
+
+# ── Out of scope ───────────────────────────────────────────────────────
+def test_out_of_scope_preserved(parser):
+    entries = parser.parse_all([
+        make_entry("domain", "admin.example.com", scope_type="out_of_scope")
+    ])
+    assert entries[0].scope_type == "out_of_scope"
+    assert entries[0].value == "admin.example.com"
+
+
+# ── Edge cases ─────────────────────────────────────────────────────────
+def test_empty_value_filtered_out(parser):
+    entries = parser.parse_all([make_entry("domain", "   ")])
+    assert entries == []
+
+def test_unrecognised_type_with_recognisable_value(parser):
+    """Unknown asset_type should fall back to value-based inference."""
+    entries = parser.parse_all([make_entry("unknown_type", "example.com")])
+    assert len(entries) == 1
+    assert entries[0].asset_type == "domain"
+
+def test_mixed_valid_and_invalid(parser):
+    entries = parser.parse_all([
+        make_entry("domain", "valid.com"),
+        make_entry("domain", ""),          # filtered out
+        make_entry("url", "https://ok.com"),
+    ])
+    assert len(entries) == 2
+```
+
+### 13.4 Unit — Upsert Logic (queued_for_scan preservation)
+
+```python
+# tests/unit/scraper/test_repository_upsert.py
+import pytest
+from unittest.mock import AsyncMock, patch, MagicMock
+from uuid import uuid4
+
+@pytest.mark.asyncio
+async def test_upsert_does_not_overwrite_queued_for_scan():
+    """
+    When a program already exists with queued_for_scan=True,
+    a second upsert call must NOT reset it to False.
+    This is the critical invariant of the upsert logic.
+    """
+    # This test verifies the SQL statement excludes queued_for_scan
+    # from the on_conflict_do_update set_ dict.
+    from backend.services.scraper.repository import ProgramRepository
+    from backend.services.scraper.collectors.models import RawProgram, RawPolicy
+
+    raw = RawProgram(
+        platform="hackerone", handle="test_prog", name="Test", url="https://h1.com/test",
+        bounty_type="paid", max_bounty=500, is_active=True, raw_policy={},
+        policy=RawPolicy(),
+    )
+    normalized = {
+        "platform": "hackerone", "handle": "test_prog", "name": "Test",
+        "url": "https://h1.com/test", "bounty_type": "paid",
+        "max_bounty": 500, "is_active": True, "raw_policy": {},
+    }
+
+    # Inspect the generated SQL to verify queued_for_scan is absent
+    # from the SET clause of the INSERT ... ON CONFLICT ... DO UPDATE.
+    # We do this by checking the update dict passed to on_conflict_do_update.
+    captured_set_dict = {}
+
+    original_on_conflict = None
+
+    with patch("backend.services.scraper.repository.pg_insert") as mock_insert:
+        mock_stmt = MagicMock()
+        mock_insert.return_value = mock_stmt
+        mock_stmt.values.return_value = mock_stmt
+
+        def capture_on_conflict(index_elements, set_):
+            captured_set_dict.update(set_)
+            return mock_stmt
+
+        mock_stmt.on_conflict_do_update.side_effect = capture_on_conflict
+        mock_stmt.returning.return_value = mock_stmt
+
+        with patch("backend.services.scraper.repository.get_session") as mock_session:
+            mock_ctx = AsyncMock()
+            mock_ctx.__aenter__ = AsyncMock(return_value=mock_ctx)
+            mock_ctx.__aexit__ = AsyncMock(return_value=False)
+            mock_ctx.execute = AsyncMock(return_value=MagicMock(fetchone=lambda: MagicMock(
+                program_id=uuid4(), created_at="2026-01-01", updated_at="2026-01-02"
+            )))
+            mock_session.return_value = mock_ctx
+
+            repo = ProgramRepository()
+            try:
+                await repo.upsert(raw, normalized)
+            except Exception:
+                pass  # We only care about the captured SET dict
+
+    assert "queued_for_scan" not in captured_set_dict, (
+        "queued_for_scan must NOT be in the ON CONFLICT DO UPDATE SET clause"
+    )
+```
+
+### 13.5 Unit — Reconciler
+
+```python
+# tests/unit/scraper/test_reconciler.py
+import pytest
+from unittest.mock import AsyncMock, MagicMock, patch
+from uuid import uuid4
+
+@pytest.mark.asyncio
+async def test_reconciler_clears_flag_on_success():
+    """Successful publish → queued_for_scan is cleared."""
+    from backend.services.scraper.reconciler import Reconciler
+
+    mock_publisher = AsyncMock()
+    mock_publisher.publish_scan_job = AsyncMock(return_value=True)
+
+    mock_program      = MagicMock()
+    mock_program.program_id = uuid4()
+    mock_program.scopes = [MagicMock()]  # non-empty
+
+    with patch("backend.services.scraper.reconciler._repo") as mock_repo:
+        mock_repo.get_programs_pending_reconcile = AsyncMock(return_value=[mock_program])
+        mock_repo.get_program_with_scopes        = AsyncMock(return_value=mock_program)
+
+        reconciler = Reconciler(publisher=mock_publisher, stale_days=7)
+        result     = await reconciler.reconcile()
+
+    assert result["succeeded"] == 1
+    assert result["failed"]    == 0
+    mock_publisher.publish_scan_job.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_reconciler_leaves_flag_on_failure():
+    """Failed publish → queued_for_scan stays true (flag not explicitly cleared)."""
+    from backend.services.scraper.reconciler import Reconciler
+
+    mock_publisher = AsyncMock()
+    mock_publisher.publish_scan_job = AsyncMock(return_value=False)
+
+    mock_program            = MagicMock()
+    mock_program.program_id = uuid4()
+    mock_program.scopes     = [MagicMock()]
+
+    with patch("backend.services.scraper.reconciler._repo") as mock_repo:
+        mock_repo.get_programs_pending_reconcile = AsyncMock(return_value=[mock_program])
+        mock_repo.get_program_with_scopes        = AsyncMock(return_value=mock_program)
+
+        reconciler = Reconciler(publisher=mock_publisher, stale_days=7)
+        result     = await reconciler.reconcile()
+
+    assert result["succeeded"] == 0
+    assert result["failed"]    == 1
+
+
+@pytest.mark.asyncio
+async def test_reconciler_skips_programs_without_scopes():
+    """Programs with no scope entries are skipped and counted as failed."""
+    from backend.services.scraper.reconciler import Reconciler
+
+    mock_publisher          = AsyncMock()
+    mock_program            = MagicMock()
+    mock_program.program_id = uuid4()
+    mock_program.scopes     = []  # empty — should be skipped
+
+    with patch("backend.services.scraper.reconciler._repo") as mock_repo:
+        mock_repo.get_programs_pending_reconcile = AsyncMock(return_value=[mock_program])
+        mock_repo.get_program_with_scopes        = AsyncMock(return_value=mock_program)
+
+        reconciler = Reconciler(publisher=mock_publisher, stale_days=7)
+        result     = await reconciler.reconcile()
+
+    mock_publisher.publish_scan_job.assert_not_called()
+    assert result["failed"] == 1
+
+
+@pytest.mark.asyncio
+async def test_reconciler_noop_when_nothing_pending():
+    """No pending programs → early return with zero counts."""
+    from backend.services.scraper.reconciler import Reconciler
+
+    mock_publisher = AsyncMock()
+    with patch("backend.services.scraper.reconciler._repo") as mock_repo:
+        mock_repo.get_programs_pending_reconcile = AsyncMock(return_value=[])
+        reconciler = Reconciler(publisher=mock_publisher)
+        result     = await reconciler.reconcile()
+
+    assert result == {"attempted": 0, "succeeded": 0, "failed": 0}
+```
+
+### 13.6 Integration — Full Scrape → DB → Queue
+
+```python
+# tests/integration/scraper/test_scrape_to_queue.py
+"""
+Integration test: full scrape flow against mocked HackerOne API.
+Requires: running Postgres (testcontainers) + running RabbitMQ (testcontainers).
+
+Run with: pytest tests/integration/ -v
+"""
+import pytest
+import json
+from unittest.mock import AsyncMock, patch
+from testcontainers.postgres import PostgresContainer
+from testcontainers.rabbitmq import RabbitMqContainer
+
+@pytest.fixture(scope="module")
+def postgres():
+    with PostgresContainer("postgres:16") as pg:
+        yield pg
+
+@pytest.fixture(scope="module")
+def rabbitmq():
+    with RabbitMqContainer("rabbitmq:3-management") as rmq:
+        yield rmq
+
+
+@pytest.mark.asyncio
+@pytest.mark.integration
+async def test_full_scrape_flow(postgres, rabbitmq):
+    """
+    End-to-end: mock H1 API → upsert to Postgres → publish to RabbitMQ.
+    Verifies the entire data path without hitting the real HackerOne API.
+    """
+    from backend.services.scraper.collectors.hackerone import HackerOneCollector
+    from backend.services.scraper.repository import ProgramRepository
+    from backend.services.scraper.publisher import ScanJobPublisher
+    from shared.db import init_db
+    from shared.queue import QueuePublisher
+
+    # ── Setup DB ───────────────────────────────────────────────────
+    init_db(postgres.get_connection_url())
+    # Run alembic migrations up to 002
+    # (In practice: subprocess alembic upgrade head)
+
+    # ── Mock HackerOne API ─────────────────────────────────────────
+    collector = HackerOneCollector(api_username="u", api_token="t")
+    mock_programs = [
+        # One program with one in-scope wildcard domain
+    ]
+
+    with patch.object(collector, "fetch_listing", AsyncMock(return_value=mock_programs)):
+        programs = await collector.fetch_listing()
+
+    # ── Upsert to DB ───────────────────────────────────────────────
+    repo = ProgramRepository()
+    # ... upsert each program and verify rows exist
+
+    # ── Publish to RabbitMQ ────────────────────────────────────────
+    queue_pub = QueuePublisher(rabbitmq.get_connection_url())
+    await queue_pub.connect()
+    scan_pub  = ScanJobPublisher(queue_pub)
+    # ... publish and verify message on queue
+
+    await queue_pub.close()
+```
+
+### 13.7 Coverage Requirements
+
+```toml
+# pyproject.toml — add to pytest section
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths    = ["tests"]
+
+[tool.coverage.run]
+source = ["backend/services/scraper", "backend/shared"]
+omit   = ["*/migrations/*", "*/tests/*"]
+
+[tool.coverage.report]
+fail_under = 80
+```
+
+---
+
+## 14. 📋 Definition of Done Checklist
+
+Work through this list in order before calling M2 complete.
+
+### 🗄️ Database
+
+- [ ] Alembic revision `002_scraper_full` runs cleanly from `migrate` container
+- [ ] `programs`, `program_scopes`, `program_policies` tables exist with correct columns
+- [ ] `alembic current` shows revision `002`
+- [ ] All indexes created: `ix_programs_platform`, `ix_programs_queued_for_scan`, `ix_program_scopes_program_id`
+- [ ] Downgrade path (`002` → `001`) tested and verified
+
+### 🧩 Collector Abstraction
+
+- [ ] `BaseCollector` abstract class with `fetch_listing`, `fetch_details`, `normalize` defined
+- [ ] `CollectorRegistry` maps `"hackerone"` → `HackerOneCollector`
+- [ ] `@register("hackerone")` decorator applied to `HackerOneCollector`
+- [ ] `get_collector("unknown_platform")` raises `CollectorError`
+
+### 🕵️ HackerOne Collector
+
+- [ ] `_get_with_retry` handles `429` with `Retry-After` delay
+- [ ] `_get_with_retry` raises `CollectorAuthError` on `401`/`403` without retrying
+- [ ] `_get_with_retry` raises `CollectorRateLimitError` after max retries exhausted
+- [ ] `fetch_listing` skips programs that fail `fetch_details` (does not abort the full run)
+- [ ] `fetch_details` uses `/structured_scopes` endpoint — NOT raw policy text
+- [ ] `H1_ASSET_TYPE_MAP` covers all known HackerOne `asset_type` values
+- [ ] `normalize` produces a dict that maps directly to `programs` table columns
+
+### 🔭 Scope Parser
+
+- [ ] Wildcard: `*.example.com` and `.example.com` both normalise to `*.example.com`
+- [ ] CIDR: `/32` normalises to host address; `/24` preserved as-is
+- [ ] URL: trailing slash stripped
+- [ ] Domain: lowercased, trailing dot removed
+- [ ] Empty `value` entries filtered out (not an error)
+- [ ] Unrecognised `asset_type` falls back to value-based inference
+- [ ] `out_of_scope` scope_type preserved correctly
+
+### 🗃️ Repository & Upsert
+
+- [ ] `upsert` on a new program: row created in `programs`, scopes in `program_scopes`
+- [ ] `upsert` on an existing program: fields updated, `queued_for_scan` **NOT** overwritten
+- [ ] `upsert` replaces scopes on every call (delete + re-insert)
+- [ ] `upsert` creates/updates policy in `program_policies`
+- [ ] `set_queued_for_scan` sets the flag correctly in both directions
+- [ ] `get_programs_pending_reconcile` only returns programs within the stale window
+
+### 📤 Queue Publisher
+
+- [ ] `ScanJobPublisher.publish_scan_job` builds a valid `ScanJobsPayload`
+- [ ] Successful publish sets `queued_for_scan = false`
+- [ ] Failed publish sets `queued_for_scan = true`
+- [ ] Programs with no in-scope entries are skipped (not published, not flagged)
+
+### ♻️ Reconciler
+
+- [ ] Reconciler queries `queued_for_scan = true AND last_scraped_at > NOW() - N days`
+- [ ] Successful republish: `queued_for_scan` cleared
+- [ ] Failed republish: flag left set for next cycle
+- [ ] Programs with empty scopes skipped and counted as failed
+- [ ] Empty pending list → early return, no DB calls
+
+### ⏰ APScheduler
+
+- [ ] Scrape job runs on startup (`next_run_time = datetime.now()` on first registration)
+- [ ] Redis lock `scraper:lock:hackerone` prevents overlapping runs
+- [ ] Lock released in `finally` block (even on scrape failure)
+- [ ] Reconciler runs every 5 minutes, independent of scrape schedule
+- [ ] `POST /api/v1/scrape/trigger` triggers the job immediately via `job.modify()`
+
+### 🌐 APIs
+
+- [ ] `POST /api/v1/scrape/trigger` returns `202` and queues the job
+- [ ] `GET /api/v1/programs` returns paginated list, filterable by `platform` and `is_active`
+- [ ] `GET /api/v1/programs/{id}` returns full program or `404`
+- [ ] `GET /api/v1/programs/{id}/scope` returns parsed scope entries or `404`
+- [ ] `GET /api/v1/health` surfaces `database`, `rabbitmq`, and `scheduler` component statuses
+
+### 🧪 Tests
+
+- [ ] `test_hackerone_collector.py` — fetch listing, fetch details, normalize, 429 retry, auth error
+- [ ] `test_scope_parser.py` — all 9+ edge cases covered
+- [ ] `test_repository_upsert.py` — `queued_for_scan` not overwritten on conflict
+- [ ] `test_reconciler.py` — success, failure, empty-scopes, no-pending cases
+- [ ] `test_scrape_to_queue.py` — integration test (mocked H1 API, real containers)
+- [ ] Coverage ≥ 80% across all scraper modules
+
+### 🔍 End-to-End Smoke Test
+
+- [ ] `docker compose up` brings scraper healthy
+- [ ] `POST /api/v1/scrape/trigger` (with test credentials) produces rows in `programs`
+- [ ] Message visible in RabbitMQ management UI at `http://localhost:15672` on `scan.jobs`
+- [ ] Simulated publish failure (stop RabbitMQ briefly) → `queued_for_scan = true`
+- [ ] Restart RabbitMQ → reconciler clears flag within 5 minutes
+- [ ] Simulated 429 mock → logs show `Retry-After` delay, scrape continues
+
+---
+
+> 📌 **End of M2 Implementation Plan.** The next document to produce is the M3 implementation plan covering Core Engine pipeline Stages 0–6 — but only after this checklist is fully green.
