@@ -1,0 +1,1 @@
+# backend/shared/schemas/__init__.py
