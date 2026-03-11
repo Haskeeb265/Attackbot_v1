@@ -469,3 +469,100 @@ Tables modified: —
 - **Always** validate scope at Stage 0 before any scan work begins — fatal on failure
 - **Never** use `shell=True` in subprocess calls — always pass args as a list
 - **Always** resolve TOTP secrets from Vault at runtime — never store in YAML scenario files
+---
+
+## 17. Lessons from M2 — Mistakes and How to Prevent Them
+
+These are real errors that occurred during M2 implementation. They are recorded here so they never repeat.
+
+---
+
+### Mistake 1 — `__init__.py` files must always be empty unless explicitly required
+
+**What happened:** `backend/services/scraper/__init__.py` was generated with an import inside it, which caused a circular import chain on test collection. Python tries to execute every `__init__.py` in the package path when resolving an import. An import inside a package `__init__.py` that itself imports from the same package creates a loop.
+
+**Rule:** Every `__init__.py` in this project is empty unless there is an explicit, documented reason to put something in it. The one exception is `collectors/__init__.py` — but even that was cleared to empty once `main.py` was confirmed to handle the self-registration import directly.
+
+**Prevention:** When creating a new `__init__.py`, default content is nothing. Zero bytes. If you find yourself putting an import in one, stop and ask why `main.py` or the caller can't do it instead.
+
+---
+
+### Mistake 2 — Always read the actual signature of shared functions before calling them
+
+**What happened:** `publisher.py` called `build_scan_job_message()` with flat keyword arguments (`program_id=`, `platform=`, `handle=`, `in_scope=`, `out_of_scope=`). The actual M1 signature takes a single `ScanJobsPayload` object. This caused a `TypeError` at runtime that only surfaced during tests — not during writing.
+
+**The correct call pattern:**
+```python
+from backend.shared.schemas.scan_jobs import build_scan_job_message, ScanJobsPayload, ScopeDefinition, ScopeEntry
+
+message = build_scan_job_message(
+    ScanJobsPayload(
+        program_id=program_id,
+        platform=program.platform,
+        handle=program.handle,
+        scope=ScopeDefinition(
+            in_scope=[ScopeEntry(asset_type="domain", value=v) for v in in_scope],
+            out_of_scope=[ScopeEntry(asset_type="domain", value=v) for v in out_of_scope],
+        ),
+    )
+)
+```
+
+**Rule:** Before calling any function from `backend/shared/`, read its actual source file first. Never assume the signature from memory or from the spec doc — the implemented signature is the truth. This applies especially to: `build_scan_job_message()`, `build_report_job_message()`, `build_envelope()`, `get_session()`, `init_db()`.
+
+---
+
+### Mistake 3 — When replacing `shared/exceptions.py`, audit all existing imports first
+
+**What happened:** M2 delivered a new `shared/exceptions.py` that was missing `QueueConnectionError`. The existing M1 `shared/queue.py` imported this name. The result was an `ImportError` that failed 8 tests — all of which were testing unrelated publisher/reconciler logic.
+
+**Rule:** Before replacing or modifying any file in `backend/shared/`, grep for every name currently imported from it across the entire codebase:
+
+```powershell
+# Find everything imported from exceptions.py
+grep -r "from backend.shared.exceptions import" backend/
+```
+
+Every name found in those imports must exist in the new version. Never remove an existing exception class — only add new ones.
+
+---
+
+### Mistake 4 — Check `requirements/base.txt` before adding dependencies
+
+**What happened:** `m2_additions.txt` specified `redis[asyncio]==5.0.1` as a new dependency, but `base.txt` already had `redis[hiredis]==5.0.4`. Pip cannot install two versions of the same package — the build failed immediately.
+
+**Rule:** Before specifying any new dependency for a milestone, run:
+
+```powershell
+grep "redis\|celery\|sqlalchemy\|pydantic\|fastapi" backend/requirements/base.txt
+```
+
+If the package already exists at any version, do not add it again. If the existing version lacks a feature you need (e.g. asyncio support), verify whether it's already included in the installed version rather than adding a duplicate pin.
+
+---
+
+### Mistake 5 — Never create files on Windows with `echo $null` or PowerShell redirection operators
+
+**What happened:** `echo $null > file.py` on PowerShell writes a UTF-16 BOM header. Python's import system cannot decode this and raises `SyntaxError: (unicode error) 'utf-8' codec can't decode byte 0xff`.
+
+**The only safe way to create an empty file on Windows PowerShell:**
+```powershell
+[System.IO.File]::WriteAllText("$PWD\path\to\file.py", "")
+```
+
+**Rule:** Never use `echo`, `>`, or `>>` to create Python files on Windows. Use `.WriteAllText()` for empty files, or write content directly in the editor.
+
+---
+
+### Mistake 6 — Verify delivered files landed as `.py` files, not directories
+
+**What happened:** `hackerone.py` was delivered as a folder named `hackerone` instead of a file named `hackerone.py`. Python's import resolution found the directory but not the module inside it, producing `ModuleNotFoundError: No module named 'backend.services.scraper.collectors.hackerone'`.
+
+**Diagnostic command — run this after receiving any file delivery:**
+```powershell
+docker run --rm -v "${PWD}/backend:/app/backend" python:3.12-slim find /app/backend/services -type d
+```
+
+Any unexpected directory name in the output (e.g. `hackerone` where `hackerone.py` was expected) means a file was created as a folder. Delete the folder and recreate the file.
+
+**Rule:** After placing any new `.py` file into the project, confirm it is a file, not a directory, before running tests.
