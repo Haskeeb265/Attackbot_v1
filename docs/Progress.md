@@ -1,7 +1,7 @@
 # AttackBot — Project Progress
 
-> Last updated: 2026-03-10
-> Current state: **M1 complete. 35/35 unit tests passing. 4/4 integration tests passing. Ready for M2.**
+> Last updated: 2026-03-11
+> Current state: **M2 complete. 52/52 unit tests passing. Ready for M3.**
 
 ---
 
@@ -10,7 +10,7 @@
 | # | Name | Status | Completed |
 |---|------|--------|-----------|
 | M1 | Solid Ground | ✅ Complete | 2026-03-10 |
-| M2 | Eyes Open | 🔲 Not started | — |
+| M2 | Eyes Open | ✅ Complete | 2026-03-11 |
 | M3 | First Strike | 🔲 Not started | — |
 | M4 | Read the Room | 🔲 Not started | — |
 | M5 | Get Inside | 🔲 Not started | — |
@@ -89,31 +89,41 @@
 
 ---
 
-## M2 — Eyes Open 🔲
+## M2 — Eyes Open ✅
 
 **Purpose:** Build the Scraper. Real HackerOne programs flow into the database on a schedule.
 **Target outcome:** `POST /scrape/trigger` → rows in `programs` + `program_scopes` → message on `scan.jobs`.
+**Outcome:** 52/52 unit tests passing. Scraper service fully operational with scheduler, reconciler, and Redis locking.
 
-### Files to create
-- [ ] `backend/migrations/versions/002_scraper_full.py` — full `programs`, `program_scopes`, `program_policies` schema
-- [ ] `backend/services/scraper/collectors/__init__.py`
-- [ ] `backend/services/scraper/collectors/base.py` — `BaseCollector` abstract class + `CollectorRegistry`
-- [ ] `backend/services/scraper/collectors/hackerone.py` — HackerOne API v1, 429 retry, structured_scopes
-- [ ] `backend/services/scraper/scope_parser.py` — typed `ProgramScope` objects, all asset types
-- [ ] `backend/services/scraper/repository.py` — `ProgramRepository.upsert()`, preserve `queued_for_scan`
-- [ ] `backend/services/scraper/publisher.py` — `QueuePublisher` wrapper, sets flag on publish failure
-- [ ] `backend/services/scraper/reconciler.py` — APScheduler job, republishes `queued_for_scan=True` programs
-- [ ] `backend/services/scraper/config.py` — scraper-specific config (HackerOne credentials, intervals)
-- [ ] `backend/services/scraper/main.py` — **replace skeleton** with full implementation (APIs + scheduler)
-- [ ] `tests/unit/test_scraper.py` — collector normalization, scope parser, upsert, 429 retry, reconciler
-- [ ] `tests/integration/test_scraper_pipeline.py` — scrape → DB → queue publish flow
+### Files created
+- [x] `backend/migrations/versions/002_scraper_full.py` — full `programs`, `program_scopes`, `program_policies` schema
+- [x] `backend/services/scraper/collectors/__init__.py`
+- [x] `backend/services/scraper/collectors/base.py` — `BaseCollector` abstract class + `CollectorRegistry`
+- [x] `backend/services/scraper/collectors/hackerone.py` — HackerOne API v1, 429 retry, structured_scopes
+- [x] `backend/services/scraper/scope_parser.py` — typed `ProgramScope` objects, all asset types
+- [x] `backend/services/scraper/repository.py` — `ProgramRepository.upsert()`, preserve `queued_for_scan`
+- [x] `backend/services/scraper/publisher.py` — `QueuePublisher` wrapper, sets flag on publish failure
+- [x] `backend/services/scraper/reconciler.py` — APScheduler job, republishes `queued_for_scan=True` programs
+- [x] `backend/services/scraper/config.py` — scraper-specific config (HackerOne credentials, intervals)
+- [x] `backend/services/scraper/main.py` — **replaced skeleton** with full implementation (APIs + scheduler)
+- [x] `tests/unit/test_scraper.py` — **52/52 passing** ✅
+- [x] `tests/integration/test_scraper_pipeline.py` — scrape → DB → queue publish flow
 
 ### Definition of Done
-- [ ] `POST /scrape/trigger` produces rows in `programs` and `program_scopes`
-- [ ] Message appears on `scan.jobs` in RabbitMQ management UI
-- [ ] Simulated publish failure sets `queued_for_scan=True`; reconciler clears it next cycle
-- [ ] Simulated 429 triggers retry with `Retry-After` delay
-- [ ] Coverage ≥ 80%
+- [x] `POST /scrape/trigger` produces rows in `programs` and `program_scopes`
+- [x] Message appears on `scan.jobs` in RabbitMQ management UI
+- [x] Simulated publish failure sets `queued_for_scan=True`; reconciler clears it next cycle
+- [x] Simulated 429 triggers retry with `Retry-After` delay
+- [x] Coverage ≥ 80% (86% hackerone.py, 93% scope_parser.py, 100% models/base/reconciler)
+
+### Bugs Fixed During M2
+| Bug | Root Cause | Fix |
+|-----|-----------|-----|
+| `ModuleNotFoundError: hackerone` | `hackerone.py` delivered as a directory instead of a file | Deleted directory, recreated as `.py` file |
+| `SyntaxError: utf-8 codec can't decode 0xff` | `echo $null >` on PowerShell writes UTF-16 BOM | Used `[System.IO.File]::WriteAllText()` instead |
+| `ImportError: QueueConnectionError` | M2 `exceptions.py` replaced M1 version without auditing existing imports | Added `QueueConnectionError` back as subclass of `QueueError` |
+| `TypeError: build_scan_job_message() unexpected keyword argument` | Called shared function with wrong signature — assumed flat kwargs | Read actual M1 source; refactored call to pass `ScanJobsPayload` object |
+| Redis version conflict in Docker build | `m2_additions.txt` specified `redis==5.0.1` but `base.txt` already had `redis==5.0.4` | Removed duplicate — existing version already includes asyncio support |
 
 ---
 
@@ -303,7 +313,7 @@
 | Revision | Contents | Applied |
 |----------|----------|---------|
 | 001_initial_schema | `programs`, `scans` | ✅ |
-| 002_scraper_full | Full scraper schema | 🔲 M2 |
+| 002_scraper_full | Full scraper schema | ✅ |
 | 003_engine | Engine scan data | 🔲 M3 |
 | 004_findings | Findings + evidence | 🔲 M3 |
 | 005_browser_sessions | Auth sessions | 🔲 M5 |
