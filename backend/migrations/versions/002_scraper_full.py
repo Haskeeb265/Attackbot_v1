@@ -57,9 +57,10 @@ def upgrade() -> None:
             "queued_for_scan", sa.BOOLEAN(), nullable=False, server_default="false"
         ))
     if not _column_exists("programs", "last_scraped_at"):
-        op.add_column("programs", sa.Column("last_scraped_at", sa.TIMESTAMPTZ(), nullable=True))
+        op.add_column("programs", sa.Column("last_scraped_at", sa.TIMESTAMP(timezone=True), nullable=True))
+
     if not _column_exists("programs", "updated_at"):
-        op.add_column("programs", sa.Column("updated_at", sa.TIMESTAMPTZ(), nullable=True))
+        op.add_column("programs", sa.Column("updated_at", sa.TIMESTAMP(timezone=True), nullable=True))
 
     # Indexes for reconciler and filtering queries
     bind = op.get_bind()
@@ -94,7 +95,7 @@ def upgrade() -> None:
         sa.Column("value", sa.VARCHAR(), nullable=False),
         sa.Column("notes", sa.TEXT(), nullable=True),
         sa.Column(
-            "created_at", sa.TIMESTAMPTZ(), nullable=False,
+            "created_at", sa.TIMESTAMP(timezone=True), nullable=False,
             server_default=sa.text("NOW()")
         ),
     )
@@ -117,7 +118,7 @@ def upgrade() -> None:
         sa.Column("testing_restrictions", sa.ARRAY(sa.TEXT()), nullable=True),
         sa.Column("safe_harbor", sa.BOOLEAN(), nullable=True),
         sa.Column(
-            "created_at", sa.TIMESTAMPTZ(), nullable=False,
+            "created_at", sa.TIMESTAMP(timezone=True), nullable=False,
             server_default=sa.text("NOW()")
         ),
     )
