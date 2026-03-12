@@ -42,9 +42,7 @@ def upgrade() -> None:
         "scans",
         sa.Column("completed_at", sa.TIMESTAMP(timezone=True), nullable=True),
     )
-
-    op.create_index("ix_scans_program_id", "scans", ["program_id"])
-    op.create_index("ix_scans_status", "scans", ["status"])
+    # NOTE: ix_scans_program_id and ix_scans_status already created in 002 — do not recreate
 
     # ---- scan_stages ----
     op.create_table(

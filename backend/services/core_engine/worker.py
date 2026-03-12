@@ -12,8 +12,7 @@ logger = get_logger("core_engine.worker")
 
 app = Celery(
     "core_worker",
-    broker=f"amqp://{config.rabbitmq_user}:{config.rabbitmq_password}"
-           f"@{config.rabbitmq_host}:{config.rabbitmq_port}/",
+    broker=config.rabbitmq_url,
 )
 
 app.conf.update(

@@ -67,6 +67,10 @@ class ScanError(AttackBotError):
     """Raised when a scan pipeline stage fails."""
 
 
+class ScanTimeoutError(ScanError):
+    """Raised when a scan pipeline stage exceeds its timeout."""
+
+
 class ScopeViolationError(ScanError):
     """
     Raised when an asset or operation would go out of scope.

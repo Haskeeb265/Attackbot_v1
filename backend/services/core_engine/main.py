@@ -21,7 +21,7 @@ scheduler = AsyncIOScheduler()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    await init_db(config.database_url)
+    init_db(config.database_url)
     publisher = QueuePublisher(config)
 
     async def _republish(program_id: str):
@@ -47,21 +47,23 @@ app = FastAPI(title="Core Engine", lifespan=lifespan)
 
 @app.get("/api/v1/health")
 async def health() -> JSONResponse:
+    from datetime import datetime, timezone
     db_ok = await check_db_health()
-    status = HealthStatus.healthy if db_ok else HealthStatus.degraded
+    status = HealthStatus.HEALTHY if db_ok else HealthStatus.DEGRADED
     return JSONResponse(
         content=HealthResponse(
             status=status,
             service=config.service_name,
+            timestamp=datetime.now(timezone.utc),
             components={
                 "database": ComponentHealth(
-                    status=HealthStatus.healthy if db_ok else HealthStatus.unhealthy
+                    status=HealthStatus.HEALTHY if db_ok else HealthStatus.UNHEALTHY
                 ),
                 "scheduler": ComponentHealth(
-                    status=HealthStatus.healthy if scheduler.running else HealthStatus.unhealthy
+                    status=HealthStatus.HEALTHY if scheduler.running else HealthStatus.UNHEALTHY
                 ),
             },
-        ).model_dump()
+        ).model_dump(mode="json")
     )
 
 
