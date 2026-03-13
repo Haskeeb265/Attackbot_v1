@@ -22,7 +22,7 @@ scheduler = AsyncIOScheduler()
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     init_db(config.database_url)
-    publisher = QueuePublisher(config)
+    publisher = QueuePublisher(config.rabbitmq_url)
 
     async def _republish(program_id: str):
         # Minimal republish — fetch program scope from Scraper API and requeue
@@ -69,14 +69,10 @@ async def health() -> JSONResponse:
 
 @app.post("/api/v1/scans/start")
 async def start_scan(body: dict) -> JSONResponse:
-    """
-    Manual scan trigger — for testing. Publishes directly to scan.jobs.
-    Body: { "program_id": "uuid", "scope": {...}, "feature_flags": {...} }
-    """
     from backend.shared.schemas.scan_jobs import build_scan_job_message, ScanJobsPayload
-    publisher = QueuePublisher(config)
+    from backend.services.core_engine.worker import scan_task
     msg = build_scan_job_message(ScanJobsPayload(**body))
-    await publisher.publish("scan.jobs", msg)
+    scan_task.apply_async(args=[msg], queue="scan.jobs")
     return JSONResponse({"status": "queued", "program_id": body.get("program_id")})
 
 

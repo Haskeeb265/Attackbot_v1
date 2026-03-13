@@ -1,4 +1,5 @@
 import uuid
+import json
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -56,7 +57,7 @@ class ScanRepository:
                 "scan_id": scan_id,
                 "program_id": program_id,
                 "priority": priority,
-                "feature_flags": str(feature_flags),  # JSONB serialized by driver
+                "feature_flags": json.dumps(feature_flags),
             },
         )
         await self.session.commit()

@@ -22,6 +22,7 @@ app.conf.update(
     task_acks_late=True,          # ack only after task completes — prevents loss on crash
     task_reject_on_worker_lost=True,  # NACK on worker death — message goes to DLQ
     worker_prefetch_multiplier=1, # one task at a time per worker — scans are heavy
+    broker_connection_retry_on_startup=True,
 )
 
 

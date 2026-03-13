@@ -41,11 +41,13 @@ async def _async_scan_pipeline(payload: dict) -> None:
     import redis.asyncio as aioredis
 
     config = EngineConfig()
+    from backend.shared.db import init_db
+    init_db(config.database_url)
     program_id = payload.get("program_id")
     scan_id = None
 
     # Redis lock — one scan per program at a time
-    redis = aioredis.from_url(f"redis://{config.redis_host}:{config.redis_port}")
+    redis = aioredis.from_url(config.redis_url)
     lock_key = f"scan:lock:{program_id}"
 
     async with redis.lock(lock_key, timeout=config.scan_lock_ttl_seconds):
@@ -83,7 +85,7 @@ async def _async_scan_pipeline(payload: dict) -> None:
             )
 
             scan_result = ScanResult()
-            publisher = QueuePublisher(config)
+            publisher = QueuePublisher(config.rabbitmq_url)
 
             try:
                 await _execute_pipeline(ctx, scan_result, repo, publisher, config)
