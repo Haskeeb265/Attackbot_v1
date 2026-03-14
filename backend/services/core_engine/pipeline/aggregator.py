@@ -86,12 +86,16 @@ async def run(
             high=breakdown.get("high", 0),
             medium=breakdown.get("medium", 0),
             low=breakdown.get("low", 0),
-            info=breakdown.get("info", 0),
+            informational=breakdown.get("info", 0),  # schema uses "informational" not "info"
         )
         payload = ReportJobsPayload(
             scan_id=ctx.scan_id,
             program_id=ctx.program_id,
+            status=status,                           # "completed" or "partial"
+            partial_stages=list(scan_result.stage_errors.keys()),
+            has_findings=saved_count > 0,
             finding_count=saved_count,
+            verified_count=0,                        # verification happens in later milestones
             severity_breakdown=sev_breakdown,
         )
         message = build_report_job_message(payload)
@@ -99,7 +103,6 @@ async def run(
         logger.info("Published scan.completed to report.jobs",
                     scan_id=ctx.scan_id)
     except Exception as e:
-        # Non-fatal — scan is complete, report will be picked up by reconciler
         logger.error("Failed to publish to report.jobs",
                      scan_id=ctx.scan_id, error=str(e))
 

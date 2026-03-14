@@ -57,7 +57,7 @@ class ScanRepository:
                 "scan_id": scan_id,
                 "program_id": program_id,
                 "priority": priority,
-                "feature_flags": json.dumps(feature_flags),
+                "feature_flags": json.dumps(feature_flags),  # JSONB — must be valid JSON
             },
         )
         await self.session.commit()
@@ -88,9 +88,9 @@ class ScanRepository:
                 "scan_id": scan_id,
                 "status": status,
                 "finding_count": finding_count,
-                "severity_breakdown": str(severity_breakdown),
-                "partial_detail": str(partial_detail) if partial_detail else None,
-                "error_detail": error_detail,
+                "severity_breakdown": json.dumps(severity_breakdown),        # JSONB
+                "partial_detail": json.dumps(partial_detail) if partial_detail else None,  # JSONB
+                "error_detail": error_detail,                                # plain text — do NOT json.dumps
             },
         )
         await self.session.commit()
@@ -122,8 +122,8 @@ class ScanRepository:
                 "stage_name": stage_name,
                 "status": status,
                 "started_at": started_at,
-                "output_summary": str(output_summary) if output_summary else None,
-                "error_detail": error_detail,
+                "output_summary": json.dumps(output_summary) if output_summary else None,  # JSONB
+                "error_detail": error_detail,                                               # plain text
             },
         )
         await self.session.commit()
@@ -151,7 +151,7 @@ class ScanRepository:
                     "scan_id": scan_id,
                     "asset_type": asset.asset_type,
                     "value": asset.value,
-                    "technology_stack": str(asset.technology_stack) if asset.technology_stack else None,
+                    "technology_stack": json.dumps(asset.technology_stack) if asset.technology_stack else None,  # JSONB
                     "waf_detected": asset.waf_detected,
                     "http_status": asset.http_status,
                 },
@@ -185,8 +185,8 @@ class ScanRepository:
                     "full_url": ep.full_url,
                     "content_type": ep.content_type,
                     "response_code": ep.response_code,
-                    "parameters": str(ep.parameters) if ep.parameters else None,
-                    "headers": str(ep.headers) if ep.headers else None,
+                    "parameters": json.dumps(ep.parameters) if ep.parameters else None,  # JSONB
+                    "headers": json.dumps(ep.headers) if ep.headers else None,            # JSONB
                     "requires_auth": ep.requires_auth,
                 },
             )
@@ -267,7 +267,7 @@ class ScanRepository:
                         "reproduction_steps": candidate.reproduction_steps,
                         "dedup_hash": dedup_hash,
                         "source": candidate.source,
-                        "raw_output": str(candidate.raw_output) if candidate.raw_output else None,
+                        "raw_output": json.dumps(candidate.raw_output) if candidate.raw_output else None,  # JSONB
                     },
                 )
                 if result.rowcount > 0:

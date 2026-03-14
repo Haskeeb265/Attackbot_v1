@@ -39,7 +39,7 @@ class ProgramRepository:
                 ) VALUES (
                     :program_id, :platform, :handle, :name, :url,
                     :bounty_type, :max_bounty, :is_active,
-                    :raw_policy::jsonb, :now, :now, :now
+                    CAST(:raw_policy AS jsonb), :now, :now, :now
                 )
                 ON CONFLICT (handle) DO UPDATE SET
                     name              = EXCLUDED.name,

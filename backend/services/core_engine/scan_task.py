@@ -86,9 +86,10 @@ async def _async_scan_pipeline(payload: dict) -> None:
 
             scan_result = ScanResult()
             publisher = QueuePublisher(config.rabbitmq_url)
+            await publisher.connect()
 
             try:
-                await _execute_pipeline(ctx, scan_result, repo, publisher, config)
+                 await _execute_pipeline(ctx, scan_result, repo, publisher, config)
             except Exception as e:
                 logger.error("Pipeline fatal error",
                              scan_id=scan_id, error=str(e))

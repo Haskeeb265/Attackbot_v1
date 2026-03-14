@@ -150,12 +150,13 @@ async def _discover_domain(
     return assets
 
 
-def _extract_root_domains(in_scope: list[str]) -> list[str]:
-    """Extract bare root domains from scope entries like '*.example.com' or 'example.com'."""
+def _extract_root_domains(in_scope: list) -> list[str]:
+    """Extract bare root domains from scope entries."""
     domains = set()
     for rule in in_scope:
-        # Strip wildcard, URL scheme, path
-        clean = rule.lstrip("*.")
+        # Scope entries are dicts with 'value' key, or plain strings
+        raw = rule["value"] if isinstance(rule, dict) else rule
+        clean = raw.lstrip("*.")
         if "://" in clean:
             parsed = urlparse(clean)
             clean = parsed.hostname or ""

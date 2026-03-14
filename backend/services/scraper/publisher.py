@@ -9,8 +9,14 @@ doesn't lose scan jobs, it queues them for retry.
 """
 
 from uuid import UUID
+
 from backend.shared.queue import QueuePublisher, Queues
-from backend.shared.schemas.scan_jobs import build_scan_job_message, ScanJobsPayload, ScopeDefinition, ScopeEntry
+from backend.shared.schemas.scan_jobs import (
+    build_scan_job_message,
+    ScanJobsPayload,
+    ScopeDefinition,
+    ScopeEntry,
+)
 from backend.shared.logging import get_logger
 from backend.services.scraper.models import Program
 from backend.services.scraper.repository import ProgramRepository
@@ -19,7 +25,6 @@ log = get_logger(__name__)
 
 
 class ScraperPublisher:
-
     def __init__(self, rabbitmq_url: str, repository: ProgramRepository):
         self._publisher = QueuePublisher(rabbitmq_url)
         self._repository = repository
@@ -28,25 +33,21 @@ class ScraperPublisher:
         await self._publisher.connect()
 
     async def publish_scan_job(self, program_id: UUID, program: Program) -> bool:
-        """
-        Publish a scan.jobs message for a program.
+        from celery import Celery
+        from backend.services.scraper.config import ScraperConfig
 
-        On success: returns True.
-        On failure: sets queued_for_scan=True in DB and returns False.
-        The reconciler will retry on its next cycle.
+        config = ScraperConfig()
+        celery_app = Celery(broker=config.rabbitmq_url)
 
-        Programs with no in-scope entries are skipped (cannot be scanned).
-        """
-        in_scope = [s.value for s in program.scopes if s.scope_type == "in_scope"]
-        out_of_scope = [s.value for s in program.scopes if s.scope_type == "out_of_scope"]
+        in_scope_scopes = [s for s in program.scopes if s.scope_type == "in_scope"]
+        out_of_scope_scopes = [s for s in program.scopes if s.scope_type == "out_of_scope"]
 
-        if not in_scope:
+        if not in_scope_scopes:
             log.warning(
                 "publish_skipped_no_scope",
                 handle=program.handle,
                 program_id=str(program_id),
             )
-            # Don't queue programs with no in-scope entries — they can't be scanned
             return False
 
         message = build_scan_job_message(
@@ -55,27 +56,47 @@ class ScraperPublisher:
                 platform=program.platform,
                 handle=program.handle,
                 scope=ScopeDefinition(
-                    in_scope=[ScopeEntry(asset_type="domain", value=v) for v in in_scope],
-                    out_of_scope=[ScopeEntry(asset_type="domain", value=v) for v in out_of_scope],
+                    in_scope=[
+                        ScopeEntry(
+                            asset_type=getattr(s, "asset_type", "domain"),
+                            value=getattr(s, "value", s),
+                        )
+                        for s in in_scope_scopes
+                    ],
+                    out_of_scope=[
+                        ScopeEntry(
+                            asset_type=getattr(s, "asset_type", "domain"),
+                            value=getattr(s, "value", s),
+                        )
+                        for s in out_of_scope_scopes
+                    ],
                 ),
             )
         )
 
-        success = await self._publisher.publish(Queues.SCAN_JOBS, message)
+        try:
+            celery_app.send_task(
+                "core_engine.scan_task",
+                args=[message],
+                queue="scan.jobs",
+            )
 
-        if not success:
+            log.info(
+                "scan_job_published",
+                handle=program.handle,
+                program_id=str(program_id),
+                in_scope_count=len(in_scope_scopes),
+            )
+
+            return True
+
+        except Exception as e:
             log.warning(
                 "publish_failed_queuing",
                 handle=program.handle,
                 program_id=str(program_id),
+                error=str(e),
             )
+
             await self._repository.mark_queued(program_id)
             return False
-
-        log.info(
-            "scan_job_published",
-            handle=program.handle,
-            program_id=str(program_id),
-            in_scope_count=len(in_scope),
-        )
-        return True
