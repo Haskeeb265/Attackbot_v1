@@ -66,3 +66,5 @@ logs/
 
 # Build artifacts
 node_modules/
+
+provider-config.yaml
