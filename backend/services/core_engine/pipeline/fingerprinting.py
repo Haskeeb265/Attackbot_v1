@@ -38,7 +38,7 @@ async def run(
             args=[
                 "httpx", "-l", targets_file, "-json", "-silent",
                 "-tech-detect", "-status-code", "-title",
-                "-response-in-json", "-no-color",
+                "-no-color",
             ],
             timeout=config.httpx_timeout,
             label="httpx_fingerprint",

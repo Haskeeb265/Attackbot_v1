@@ -16,6 +16,7 @@ class FeatureFlags:
     sqli: bool = False
     ssrf: bool = False
     crlf: bool = False
+    nuclei: bool = False
     browser_session: bool = False
     api_fuzzing: bool = False
     ai_hypothesis: bool = False

@@ -13,6 +13,13 @@ logger = get_logger("core_engine.stage5")
 STAGE_NUMBER = 5.0
 STAGE_NAME = "web_vuln_tests"
 
+# Passive checks based on enumerated endpoints (no HTTP requests needed)
+SENSITIVE_PATHS = {
+    "/.env": ("Exposed environment file", "critical"),
+    "/.git/HEAD": ("Exposed Git metadata", "critical"),
+    "/.git/config": ("Exposed Git config", "critical"),
+}
+
 # XSS probe payloads — reflected only, no stored
 XSS_PAYLOADS = [
     '<script>alert(1)</script>',
@@ -72,12 +79,41 @@ async def _test_endpoint(
     flags: FeatureFlags,
 ) -> list[FindingCandidate]:
     findings = []
+    findings.extend(_passive_sensitive_path_findings(ep))
     findings.extend(await _test_xss(ep, client))
     findings.extend(await _test_cors(ep, client))
     if flags.crlf:
         findings.extend(await _test_crlf(ep, client))
     # SQLi and SSRF are gated — implement in M6+ or when flags are enabled
     return findings
+
+
+def _passive_sensitive_path_findings(ep: DiscoveredEndpoint) -> list[FindingCandidate]:
+    """
+    Create findings for clearly sensitive paths discovered during enumeration.
+    Uses `ep.response_code` if present; does not perform an HTTP request.
+    """
+    if not ep.response_code:
+        return []
+    title_sev = SENSITIVE_PATHS.get(ep.path)
+    if not title_sev:
+        return []
+    title, severity = title_sev
+    # Treat auth-required access as still significant
+    if ep.response_code not in {200, 204, 301, 302, 307, 401, 403}:
+        return []
+    return [
+        FindingCandidate(
+            vulnerability_type="sensitive_file_exposure",
+            title=title,
+            severity=severity,
+            affected_url=ep.full_url,
+            description=f"Sensitive path `{ep.path}` was discovered during enumeration with HTTP {ep.response_code}.",
+            source="enumeration_passive",
+            reproduction_steps=f"GET {ep.full_url}\nObserve HTTP {ep.response_code}.",
+            raw_output={"path": ep.path, "response_code": ep.response_code},
+        )
+    ]
 
 
 async def _test_xss(

@@ -7,7 +7,6 @@ from urllib.parse import urlparse
 from backend.services.core_engine.pipeline.context import ScanContext
 from backend.services.core_engine.models import DiscoveredAsset
 from backend.services.core_engine.subprocess_utils import (
-    run_tool_streaming,
     run_tool_communicate,
     parse_jsonl,
 )
@@ -66,12 +65,24 @@ async def _discover_domain(
 ) -> list[DiscoveredAsset]:
     """Run the full subfinder → alterx → dnsx → httpx pipeline for one domain."""
 
-    # Step 1: subfinder — passive subdomain enumeration
-    subfinder_lines = await run_tool_streaming(
-        args=["subfinder", "-d", domain, "-silent", "-all"],
-        timeout=config.subfinder_timeout,
-        label=f"subfinder[{domain}]",
-    )
+    # Step 1: subfinder — passive subdomain enumeration (file output to avoid non-TTY buffering)
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as tf:
+        subfinder_out = tf.name
+    try:
+        await run_tool_communicate(
+            args=[
+                "subfinder", "-d", domain, "-all",
+                "-pc", "/app/subfinder-config/provider-config.yaml",
+                "-timeout", "30",
+                "-o", subfinder_out,
+            ],
+            timeout=config.subfinder_timeout,
+            label=f"subfinder[{domain}]",
+        )
+        with open(subfinder_out) as f:
+            subfinder_lines = f.read().splitlines()
+    finally:
+        os.unlink(subfinder_out)
     subdomains = list({line.strip() for line in subfinder_lines if line.strip()})
     logger.debug("subfinder complete", domain=domain, found=len(subdomains))
 
@@ -108,7 +119,11 @@ async def _discover_domain(
             timeout=config.dnsx_timeout,
             label=f"dnsx[{domain}]",
         )
-        live_domains = [l.strip() for l in dnsx_stdout.splitlines() if l.strip()]
+        live_domains = [
+            l.strip().split()[0]   # extract just the domain, strip " [1.2.3.4]" suffix
+            for l in dnsx_stdout.splitlines() if l.strip()
+        ]
+
     finally:
         os.unlink(candidates_file)
 
@@ -134,7 +149,9 @@ async def _discover_domain(
     # Parse httpx JSON output into DiscoveredAsset objects
     assets: list[DiscoveredAsset] = []
     for entry in parse_jsonl(httpx_stdout):
-        url = entry.get("url", "")
+        if entry.get("failed"):
+            continue
+        url = _normalize_httpx_url(entry)
         if not url:
             continue
         if not scope_filter.is_in_scope(url):
@@ -143,32 +160,54 @@ async def _discover_domain(
             asset_type="subdomain",
             value=url,
             http_status=entry.get("status_code"),
-            technology_stack={"technologies": entry.get("tech", [])},
+            technology_stack={"technologies": [t.get("name", str(t)) if isinstance(t, dict) else str(t)
+            for t in entry.get("tech", [])]
+            },
             waf_detected=_extract_waf(entry),
         ))
 
     return assets
 
 
+def _normalize_httpx_url(entry: dict) -> str:
+    """Extract URL string from httpx JSON entry; handles string/dict 'url' and 'input' fallback."""
+    url = entry.get("url") or entry.get("input") or ""
+    if isinstance(url, dict):
+        url = url.get("url") or url.get("host") or ""
+    return str(url).strip() if url else ""
+
+
 def _extract_root_domains(in_scope: list) -> list[str]:
-    """Extract bare root domains from scope entries."""
+    """
+    Extract bare root domains from scope entries.
+    Only processes domain and wildcard_domain asset types.
+    Skips: url, ip_range, mobile_app, api — subfinder can't use these.
+    """
+    DOMAIN_TYPES = {"domain", "wildcard_domain"}
     domains = set()
     for rule in in_scope:
-        # Scope entries are dicts with 'value' key, or plain strings
-        raw = rule["value"] if isinstance(rule, dict) else rule
-        clean = raw.lstrip("*.")
-        if "://" in clean:
-            parsed = urlparse(clean)
-            clean = parsed.hostname or ""
-        clean = clean.split("/")[0]
-        if clean:
+        if isinstance(rule, dict):
+            asset_type = rule.get("asset_type", "")
+            raw = rule.get("value", "")
+        else:
+            # plain string — no type info, attempt to use it
+            asset_type = "domain"
+            raw = rule
+
+        if asset_type not in DOMAIN_TYPES:
+            continue
+
+        clean = raw.lstrip("*.").split("/")[0].strip()
+        if clean and "." in clean:
             domains.add(clean)
+
     return list(domains)
 
 
 def _extract_waf(httpx_entry: dict) -> str | None:
     """Extract WAF name from httpx tech detection output if present."""
     for tech in httpx_entry.get("tech", []):
-        if "waf" in tech.lower() or "cloudflare" in tech.lower() or "akamai" in tech.lower():
-            return tech
+        name = tech.get("name", "") if isinstance(tech, dict) else str(tech)
+        if "waf" in name.lower() or "cloudflare" in name.lower() or "akamai" in name.lower():
+            return name
     return None

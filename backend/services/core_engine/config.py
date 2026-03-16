@@ -10,7 +10,7 @@ class EngineConfig(BaseServiceConfig):
     scraper_api_timeout_seconds: int = 30
 
     # Subprocess timeouts (seconds)
-    subfinder_timeout: int = 1800   # 30 min — large programs have many subdomains
+    subfinder_timeout: int = 600   # 5 min for testing — change back to 1800 for prod
     dnsx_timeout: int = 900
     httpx_timeout: int = 600
     ffuf_timeout: int = 1800

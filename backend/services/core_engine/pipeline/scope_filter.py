@@ -83,22 +83,36 @@ class ScopeFilter:
         return False
 
     @staticmethod
-    def _matches_rule(domain: str, rule: str) -> bool:
+    def _matches_rule(domain: str, rule: str | dict) -> bool:
         """
         Match a domain against a scope rule.
-        Supports: exact match, wildcard (*.example.com), URL prefix.
+        Supports: exact match, wildcard (*.example.com), root domain (domain + subdomains).
+        Rule may be a string (domain/URL) or a dict with "value" and "asset_type" (from API).
+        - String "*.example.com": wildcard — subdomains only, not root.
+        - String "api.example.com": exact — that host only.
+        - Dict asset_type "domain" value "hackerone.com": root domain — hackerone.com + *.hackerone.com.
+        - Dict asset_type "wildcard_domain" or value "*.x": wildcard — subdomains only.
         """
+        asset_type: str | None = None
+        if isinstance(rule, dict):
+            asset_type = rule.get("asset_type")
+            rule = rule.get("value") or rule.get("url") or ""
+        rule_str = str(rule).strip()
         rule_domain = ScopeFilter._extract_domain(rule)
-        if rule_domain.startswith("*."):
-            # Wildcard: *.example.com matches sub.example.com but not example.com
-            suffix = rule_domain[2:]  # "example.com"
-            return domain == suffix or domain.endswith("." + suffix)
-        # Exact domain match or URL prefix match
-        return domain == rule_domain or domain.endswith("." + rule_domain)
+        if rule_str.startswith("*.") or asset_type == "wildcard_domain":
+            # Wildcard: *.example.com matches sub.example.com only, not example.com (root)
+            return domain.endswith("." + rule_domain)
+        if asset_type == "domain":
+            # API root domain: match domain and all subdomains
+            return domain == rule_domain or domain.endswith("." + rule_domain)
+        # Exact: match this host only, not subdomains
+        return domain == rule_domain
 
     @staticmethod
     def _extract_domain(target: str) -> str:
         """Extract lowercase hostname from URL or raw domain string."""
+        if not isinstance(target, str):
+            target = str(target)
         if "://" in target:
             parsed = urlparse(target)
             host = parsed.hostname or ""
@@ -114,9 +128,11 @@ class ScopeFilter:
             return None
 
     @staticmethod
-    def _parse_cidrs(rules: list[str]) -> list["ipaddress.IPv4Network | ipaddress.IPv6Network"]:
+    def _parse_cidrs(rules: list[str] | list[dict]) -> list["ipaddress.IPv4Network | ipaddress.IPv6Network"]:
         networks = []
         for rule in rules:
+            if isinstance(rule, dict):
+                rule = rule.get("value") or rule.get("url") or ""
             try:
                 networks.append(ipaddress.ip_network(rule, strict=False))
             except ValueError:

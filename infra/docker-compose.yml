@@ -66,6 +66,7 @@ services:
     environment:
       RABBITMQ_DEFAULT_USER: ${RABBITMQ_DEFAULT_USER}
       RABBITMQ_DEFAULT_PASS: ${RABBITMQ_DEFAULT_PASS}
+      RABBITMQ_SERVER_ADDITIONAL_ERL_ARGS: "-rabbit consumer_timeout 21600000"
     volumes:
       - rabbitmq_data:/var/lib/rabbitmq
     networks: [attackbot-net]
@@ -347,6 +348,7 @@ services:
     build:
       context: ..
       dockerfile: backend/services/core_engine/Dockerfile
+    user: "1000:1000"
     command: >
       celery -A backend.services.core_engine.worker worker
       -Q scan.jobs -c 2 --loglevel=info

@@ -50,7 +50,12 @@ async def _async_scan_pipeline(payload: dict) -> None:
     redis = aioredis.from_url(config.redis_url)
     lock_key = f"scan:lock:{program_id}"
 
-    async with redis.lock(lock_key, timeout=config.scan_lock_ttl_seconds):
+    lock = redis.lock(lock_key, timeout=config.scan_lock_ttl_seconds, blocking=False)
+    acquired = await lock.acquire()
+    if not acquired:
+        logger.warning("Scan lock held — skipping", program_id=program_id, lock_key=lock_key)
+        return
+    try:
         async with get_session() as session:
             repo = ScanRepository(session)
 
@@ -65,6 +70,7 @@ async def _async_scan_pipeline(payload: dict) -> None:
                 sqli=flags_raw.get("sqli", False),
                 ssrf=flags_raw.get("ssrf", False),
                 crlf=flags_raw.get("crlf", False),
+                nuclei=flags_raw.get("nuclei", False),
                 browser_session=flags_raw.get("browser_session", False),
                 api_fuzzing=flags_raw.get("api_fuzzing", False),
                 ai_hypothesis=flags_raw.get("ai_hypothesis", False),
@@ -100,6 +106,11 @@ async def _async_scan_pipeline(payload: dict) -> None:
                     severity_breakdown={},
                     error_detail=str(e),
                 )
+    finally:
+        try:
+            await lock.release()
+        except Exception:
+            pass
 
 
 async def _execute_pipeline(
@@ -172,11 +183,18 @@ async def _execute_pipeline(
 
     # ── Stages 4 + 5: Parallel ───────────────────────────────────────────
     s4_start = datetime.now(timezone.utc)
+    async def _noop_findings() -> list:
+        return []
+
     nuclei_task = asyncio.create_task(
         nuclei_scan.run(ctx, scan_result.assets, scope_filter, config)
+        if ctx.feature_flags.nuclei
+        else _noop_findings()
     )
+    max_web_endpoints = int(getattr(config, "web_vuln_max_endpoints", 500))
+    web_endpoints = scan_result.endpoints[:max_web_endpoints]
     web_task = asyncio.create_task(
-        web_vuln_tests.run(ctx, scan_result.endpoints, scope_filter, ctx.feature_flags)
+        web_vuln_tests.run(ctx, web_endpoints, scope_filter, ctx.feature_flags)
     )
     nuclei_findings, web_findings = await asyncio.gather(
         nuclei_task, web_task, return_exceptions=True

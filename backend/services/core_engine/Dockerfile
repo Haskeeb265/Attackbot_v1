@@ -33,5 +33,10 @@ COPY backend/__init__.py /app/backend/__init__.py
 COPY backend/services/__init__.py /app/backend/services/__init__.py
 COPY backend/services/core_engine /app/backend/services/core_engine
 ENV PYTHONPATH=/app
+
+# Non-root user for Celery worker (avoids SecurityWarning when running as root)
+RUN groupadd --gid 1000 appuser && useradd --uid 1000 --gid 1000 --create-home appuser && chown -R appuser:appuser /app
+
 EXPOSE 8002
+USER appuser
 CMD ["uvicorn", "backend.services.core_engine.main:app", "--host", "0.0.0.0", "--port", "8002"]

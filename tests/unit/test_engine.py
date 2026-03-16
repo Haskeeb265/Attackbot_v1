@@ -5,6 +5,9 @@ All DB calls are mocked — no real database required.
 """
 
 import hashlib
+import json
+import os
+import uuid
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 from urllib.parse import urlencode
@@ -276,6 +279,43 @@ class TestWebVulnTests:
         assert len(findings) > 0
         assert findings[0].vulnerability_type == "cors_misconfiguration"
 
+    @pytest.mark.asyncio
+    async def test_run_emits_passive_sensitive_finding_without_requests(self):
+        from backend.services.core_engine.pipeline.web_vuln_tests import run
+        from backend.services.core_engine.pipeline.context import ScanContext, FeatureFlags, ScopeDefinition
+        from backend.services.core_engine.models import DiscoveredEndpoint
+        import uuid as _uuid
+
+        ctx = ScanContext(
+            scan_id=str(_uuid.uuid4()),
+            program_id=str(_uuid.uuid4()),
+            scope=ScopeDefinition(in_scope=["*.example.com"], out_of_scope=[]),
+            feature_flags=FeatureFlags(),
+        )
+        sf = ScopeFilter(ctx.scope)
+        ep = DiscoveredEndpoint(
+            asset_id=_uuid.uuid4(),
+            method="GET",
+            path="/.env",
+            full_url="https://api.example.com/.env",
+            response_code=200,
+        )
+
+        # Make HTTP client calls fail if invoked; passive check should still emit a finding.
+        class _ClientCM:
+            async def __aenter__(self):
+                client = AsyncMock()
+                client.get.side_effect = AssertionError("HTTP request should not be required for passive finding")
+                return client
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return None
+
+        with patch("backend.services.core_engine.pipeline.web_vuln_tests.httpx.AsyncClient", return_value=_ClientCM()):
+            findings = await run(ctx, [ep], sf, ctx.feature_flags)
+
+        assert any(f.vulnerability_type == "sensitive_file_exposure" for f in findings)
+
 
 # ── Scan State Machine tests ─────────────────────────────────────────────────
 
@@ -309,3 +349,522 @@ class TestScanStateMachine:
         has_errors = bool(scan_result.stage_errors)
         expected_status = "partial" if has_errors else "completed"
         assert expected_status == "partial"
+
+
+# ── Asset Discovery (Stage 1) tests ─────────────────────────────────────────
+
+class TestAssetDiscovery:
+    @pytest.mark.asyncio
+    async def test_stage1_discovers_assets_happy_path(self):
+        """
+        Covers: subfinder file output, alterx, dnsx parsing, httpx JSON parsing,
+        scope filtering, and DiscoveredAsset creation.
+        """
+        from backend.services.core_engine.pipeline import asset_discovery
+        from backend.services.core_engine.pipeline.context import ScanContext, FeatureFlags, ScopeDefinition
+        from backend.services.core_engine.pipeline.scope_filter import ScopeFilter
+
+        ctx = ScanContext(
+            scan_id=str(uuid.uuid4()),
+            program_id=str(uuid.uuid4()),
+            scope=ScopeDefinition(
+                in_scope=[{"asset_type": "domain", "value": "example.com"}],
+                out_of_scope=[],
+            ),
+            feature_flags=FeatureFlags(),
+        )
+        sf = ScopeFilter(ctx.scope)
+        config = MagicMock()
+        config.subfinder_timeout = 5
+        config.dnsx_timeout = 5
+        config.httpx_timeout = 5
+
+        async def fake_run_tool_communicate(args, timeout, label, **kwargs):
+            if args[0] == "subfinder":
+                out_path = args[args.index("-o") + 1]
+                with open(out_path, "w", encoding="utf-8") as f:
+                    f.write("api.example.com\n")
+                return "", ""
+            if args[0] == "alterx":
+                return "dev.api.example.com\n", ""
+            if args[0] == "dnsx":
+                return "api.example.com [1.2.3.4]\n", ""
+            if args[0] == "httpx":
+                return json.dumps({"url": "https://api.example.com", "status_code": 200, "tech": []}) + "\n", ""
+            raise AssertionError(f"Unexpected tool: {args[0]}")
+
+        with patch("backend.services.core_engine.pipeline.asset_discovery.run_tool_communicate", new=fake_run_tool_communicate):
+            assets = await asset_discovery.run(ctx, sf, config)
+
+        assert len(assets) == 1
+        assert assets[0].value == "https://api.example.com"
+
+
+# ── Fingerprinting (Stage 2) tests ─────────────────────────────────────────
+
+class TestFingerprinting:
+    @pytest.mark.asyncio
+    async def test_stage2_does_not_use_response_in_json_flag(self):
+        from backend.services.core_engine.pipeline import fingerprinting
+        from backend.services.core_engine.pipeline.context import ScanContext, FeatureFlags, ScopeDefinition
+        from backend.services.core_engine.models import DiscoveredAsset
+
+        ctx = ScanContext(
+            scan_id=str(uuid.uuid4()),
+            program_id=str(uuid.uuid4()),
+            scope=ScopeDefinition(in_scope=["*.example.com"], out_of_scope=[]),
+            feature_flags=FeatureFlags(),
+        )
+        assets = [DiscoveredAsset(asset_type="url", value="https://api.example.com")]
+        config = MagicMock()
+        config.httpx_timeout = 5
+
+        captured = {"args": None}
+
+        async def fake_httpx(args, timeout, label, **kwargs):
+            captured["args"] = args
+            return json.dumps({"url": "https://api.example.com", "status_code": 200, "tech": []}) + "\n", ""
+
+        with patch("backend.services.core_engine.pipeline.fingerprinting.run_tool_communicate", new=fake_httpx):
+            out = await fingerprinting.run(ctx, assets, config)
+
+        assert out[0].http_status == 200
+        assert captured["args"] is not None
+        assert "-response-in-json" not in captured["args"]
+
+
+# ── Enumeration (Stage 3) tests ────────────────────────────────────────────
+
+class TestEnumeration:
+    @pytest.mark.asyncio
+    async def test_stage3_runs_ffuf_and_parses_output_file(self, tmp_path):
+        from backend.services.core_engine.pipeline import enumeration
+        from backend.services.core_engine.pipeline.context import ScanContext, FeatureFlags, ScopeDefinition
+        from backend.services.core_engine.pipeline.scope_filter import ScopeFilter
+        from backend.services.core_engine.models import DiscoveredAsset
+
+        ctx = ScanContext(
+            scan_id=str(uuid.uuid4()),
+            program_id=str(uuid.uuid4()),
+            scope=ScopeDefinition(in_scope=[{"asset_type": "domain", "value": "example.com"}], out_of_scope=[]),
+            feature_flags=FeatureFlags(),
+        )
+        sf = ScopeFilter(ctx.scope)
+        asset = DiscoveredAsset(asset_type="url", value="https://example.com", asset_id=uuid.uuid4())
+        config = MagicMock()
+        config.ffuf_timeout = 5
+        config.ffuf_wordlist = "/wordlists/common.txt"
+
+        async def fake_tool(args, timeout, label, **kwargs):
+            if args[0] == "ffuf":
+                out_path = args[args.index("-o") + 1]
+                with open(out_path, "w", encoding="utf-8") as f:
+                    f.write(json.dumps({"results": [{"url": "https://example.com/.git/HEAD", "status": 200}]}) )
+                return "", ""
+            if args[0] == "waybackurls":
+                raise FileNotFoundError()
+            raise AssertionError(args[0])
+
+        with patch("backend.services.core_engine.pipeline.enumeration.run_tool_communicate", new=fake_tool):
+            eps, js = await enumeration.run(ctx, [asset], sf, config)
+
+        assert any(e.path == "/.git/HEAD" and e.response_code == 200 for e in eps)
+        assert js == []
+
+
+# ── Passive sensitive path findings (Stage 5 helper) ───────────────────────
+
+class TestPassiveSensitiveFindings:
+    def test_sensitive_path_emits_finding(self):
+        from backend.services.core_engine.pipeline.web_vuln_tests import _passive_sensitive_path_findings
+        from backend.services.core_engine.models import DiscoveredEndpoint
+
+        ep = DiscoveredEndpoint(
+            asset_id=uuid.uuid4(),
+            method="GET",
+            path="/.git/HEAD",
+            full_url="https://example.com/.git/HEAD",
+            response_code=200,
+        )
+        findings = _passive_sensitive_path_findings(ep)
+        assert len(findings) == 1
+        assert findings[0].vulnerability_type == "sensitive_file_exposure"
+
+
+# ── Aggregator (Stage 7) tests ─────────────────────────────────────────────
+
+class TestAggregator:
+    @pytest.mark.asyncio
+    async def test_aggregator_saves_and_marks_complete(self):
+        from backend.services.core_engine.pipeline import aggregator
+        from backend.services.core_engine.pipeline.context import ScanContext, FeatureFlags, ScopeDefinition
+        from backend.services.core_engine.models import ScanResult, FindingCandidate
+
+        ctx = ScanContext(
+            scan_id=str(uuid.uuid4()),
+            program_id=str(uuid.uuid4()),
+            scope=ScopeDefinition(in_scope=["*.example.com"], out_of_scope=[]),
+            feature_flags=FeatureFlags(),
+        )
+        scan_result = ScanResult(
+            finding_candidates=[
+                FindingCandidate(
+                    vulnerability_type="sensitive_file_exposure",
+                    title="Exposed .git/HEAD",
+                    severity="critical",
+                    affected_url="https://example.com/.git/HEAD",
+                    description="",
+                    source="test",
+                )
+            ]
+        )
+
+        repo = AsyncMock()
+        repo.save_findings = AsyncMock(return_value=1)
+        repo.mark_scan_complete = AsyncMock()
+
+        publisher = AsyncMock()
+        publisher.publish = AsyncMock(return_value=True)
+
+        breakdown = await aggregator.run(ctx, scan_result, repo, publisher)
+        assert breakdown["critical"] == 1
+        repo.save_findings.assert_called()
+        repo.mark_scan_complete.assert_called()
+        publisher.publish.assert_called()
+
+
+# ── Watchdog tests ─────────────────────────────────────────────────────────
+
+class TestWatchdog:
+    @pytest.mark.asyncio
+    async def test_recover_stuck_scans_marks_failed_internal(self):
+        from backend.services.core_engine.watchdog import recover_stuck_scans
+
+        scan_id = str(uuid.uuid4())
+        program_id = str(uuid.uuid4())
+
+        mock_session = AsyncMock()
+        mock_session.commit = AsyncMock()
+
+        fetch_result = MagicMock()
+        fetch_result.fetchall.return_value = [(scan_id, 0, program_id)]
+        mock_session.execute = AsyncMock(return_value=fetch_result)
+
+        republished = []
+
+        async def republish_fn(program_id=None, **_kwargs):
+            republished.append(program_id)
+
+        class _CM:
+            async def __aenter__(self):
+                return mock_session
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return None
+
+        with patch("backend.services.core_engine.watchdog.get_session", return_value=_CM()):
+            await recover_stuck_scans(republish_fn=republish_fn, stale_hours=2)
+
+        # SELECT + UPDATE + COMMIT happened
+        assert mock_session.execute.call_count >= 2
+        assert mock_session.commit.called
+        assert republished == [program_id]
+
+
+# ── Repository tests (SQL wrappers) ─────────────────────────────────────────
+
+class TestRepository:
+    @pytest.mark.asyncio
+    async def test_create_or_resume_scan_creates_new_row(self):
+        from backend.services.core_engine.repository import ScanRepository
+
+        mock_session = AsyncMock()
+
+        # No existing running scan
+        select_result = MagicMock()
+        select_result.fetchone.return_value = None
+
+        mock_session.execute = AsyncMock(side_effect=[select_result, MagicMock()])
+        mock_session.commit = AsyncMock()
+
+        repo = ScanRepository(mock_session)
+        scan_id = await repo.create_or_resume_scan(program_id=str(uuid.uuid4()), feature_flags={}, priority=1)
+        assert isinstance(scan_id, str)
+        assert mock_session.commit.called
+
+    @pytest.mark.asyncio
+    async def test_save_findings_counts_inserts(self):
+        from backend.services.core_engine.repository import ScanRepository
+        from backend.services.core_engine.models import FindingCandidate
+
+        mock_session = AsyncMock()
+        mock_session.commit = AsyncMock()
+        ok_insert = MagicMock()
+        ok_insert.rowcount = 1
+        mock_session.execute = AsyncMock(return_value=ok_insert)
+
+        repo = ScanRepository(mock_session)
+        saved = await repo.save_findings(
+            scan_id=str(uuid.uuid4()),
+            program_id=str(uuid.uuid4()),
+            candidates=[
+                FindingCandidate(
+                    vulnerability_type="xss",
+                    title="XSS",
+                    severity="high",
+                    affected_url="https://example.com",
+                    description="",
+                    source="test",
+                )
+            ],
+        )
+        assert saved == 1
+
+
+# ── scan_task pipeline wiring tests ─────────────────────────────────────────
+
+class TestScanTaskPipeline:
+    @pytest.mark.asyncio
+    async def test_execute_pipeline_calls_stages_and_aggregator(self):
+        from backend.services.core_engine.scan_task import _execute_pipeline
+        from backend.services.core_engine.pipeline.context import ScanContext, FeatureFlags, ScopeDefinition
+        from backend.services.core_engine.models import ScanResult, DiscoveredAsset, DiscoveredEndpoint
+        from backend.services.core_engine.pipeline.scope_filter import ScopeFilter
+
+        ctx = ScanContext(
+            scan_id=str(uuid.uuid4()),
+            program_id=str(uuid.uuid4()),
+            scope=ScopeDefinition(in_scope=[{"asset_type": "domain", "value": "example.com"}], out_of_scope=[]),
+            feature_flags=FeatureFlags(nuclei=False),
+        )
+        sf = ScopeFilter(ctx.scope)
+        scan_result = ScanResult()
+        repo = AsyncMock()
+        publisher = AsyncMock()
+        config = MagicMock()
+        config.httpx_timeout = 5
+
+        fake_assets = [DiscoveredAsset(asset_type="url", value="https://example.com")]
+        fake_assets[0].asset_id = uuid.uuid4()
+        fake_endpoints = [DiscoveredEndpoint(asset_id=fake_assets[0].asset_id, method="GET", path="/.git/HEAD", full_url="https://example.com/.git/HEAD", response_code=200)]
+
+        with patch("backend.services.core_engine.scan_task.asset_discovery.run", new=AsyncMock(return_value=fake_assets)), \
+             patch("backend.services.core_engine.scan_task.fingerprinting.run", new=AsyncMock(return_value=fake_assets)), \
+             patch("backend.services.core_engine.scan_task.enumeration.run", new=AsyncMock(return_value=(fake_endpoints, []))), \
+             patch("backend.services.core_engine.scan_task.web_vuln_tests.run", new=AsyncMock(return_value=[])), \
+             patch("backend.services.core_engine.scan_task.nuclei_scan.run", new=AsyncMock(return_value=[])), \
+             patch("backend.services.core_engine.scan_task.js_secrets.run", new=AsyncMock(return_value=[])), \
+             patch("backend.services.core_engine.scan_task.aggregator.run", new=AsyncMock(return_value={})):
+            await _execute_pipeline(ctx, scan_result, repo, publisher, config)
+
+        # At least stage persistence methods invoked
+        assert repo.save_assets.called
+        assert repo.save_endpoints.called
+
+
+# ── Import smoke tests (cover main/worker/config) ───────────────────────────
+
+class TestImports:
+    def test_imports_main_worker_config(self):
+        import sys
+        import types
+        from backend.services.core_engine.config import EngineConfig
+        from backend.services.core_engine import main as core_main
+        # In this repo, celery is only required at runtime in the container.
+        # For unit tests on dev machines without celery installed, stub it.
+        if "celery" not in sys.modules:
+            celery_mod = types.ModuleType("celery")
+
+            class _Celery:
+                def __init__(self, *args, **kwargs):
+                    self.conf = {}
+
+                def task(self, *args, **kwargs):
+                    def _wrap(fn):
+                        return fn
+
+                    return _wrap
+
+            celery_mod.Celery = _Celery
+            sys.modules["celery"] = celery_mod
+
+        from backend.services.core_engine import worker as core_worker
+
+        cfg = EngineConfig()
+        assert cfg.service_name
+        assert core_main.app is not None
+        assert core_worker.app is not None
+
+
+# ── subprocess_utils tests (increase coverage) ──────────────────────────────
+
+class TestSubprocessUtils:
+    @pytest.mark.asyncio
+    async def test_run_tool_communicate_success(self):
+        from backend.services.core_engine import subprocess_utils
+
+        class _Proc:
+            def __init__(self):
+                self.returncode = 0
+
+            async def communicate(self):
+                return (b"ok\n", b"")
+
+            def kill(self):
+                return None
+
+            async def wait(self):
+                return 0
+
+        async def fake_create(*args, **kwargs):
+            return _Proc()
+
+        with patch("backend.services.core_engine.subprocess_utils.asyncio.create_subprocess_exec", new=fake_create):
+            out, err = await subprocess_utils.run_tool_communicate(
+                args=["echo", "hi"], timeout=1, label="t"
+            )
+        assert "ok" in out
+        assert err == ""
+
+    @pytest.mark.asyncio
+    async def test_run_tool_communicate_nonzero_raises(self):
+        from backend.services.core_engine import subprocess_utils
+        from backend.shared.exceptions import ScanError
+
+        class _Proc:
+            def __init__(self):
+                self.returncode = 2
+
+            async def communicate(self):
+                return (b"", b"bad")
+
+            def kill(self):
+                return None
+
+            async def wait(self):
+                return 0
+
+        async def fake_create(*args, **kwargs):
+            return _Proc()
+
+        with patch("backend.services.core_engine.subprocess_utils.asyncio.create_subprocess_exec", new=fake_create):
+            with pytest.raises(ScanError):
+                await subprocess_utils.run_tool_communicate(
+                    args=["cmd"], timeout=1, label="t"
+                )
+
+
+# ── nuclei_scan tests ───────────────────────────────────────────────────────
+
+class TestNucleiScan:
+    @pytest.mark.asyncio
+    async def test_nuclei_scan_parses_jsonl(self):
+        from backend.services.core_engine.pipeline import nuclei_scan
+        from backend.services.core_engine.pipeline.context import ScanContext, FeatureFlags, ScopeDefinition
+        from backend.services.core_engine.pipeline.scope_filter import ScopeFilter
+        from backend.services.core_engine.models import DiscoveredAsset
+
+        ctx = ScanContext(
+            scan_id=str(uuid.uuid4()),
+            program_id=str(uuid.uuid4()),
+            scope=ScopeDefinition(in_scope=["example.com"], out_of_scope=[]),
+            feature_flags=FeatureFlags(),
+        )
+        sf = ScopeFilter(ctx.scope)
+        config = MagicMock()
+        config.nuclei_timeout = 5
+        config.nuclei_rate_limit = 10
+        config.nuclei_concurrency = 2
+        config.nuclei_templates = ""
+
+        assets = [DiscoveredAsset(asset_type="url", value="https://example.com", asset_id=uuid.uuid4())]
+
+        async def fake_nuclei(args, timeout, label, **kwargs):
+            # one nuclei JSON line
+            return json.dumps({"matched-at": "https://example.com/.git/HEAD", "info": {"name": "Test", "severity": "high"}}) + "\n", ""
+
+        with patch("backend.services.core_engine.pipeline.nuclei_scan.run_tool_communicate", new=fake_nuclei):
+            findings = await nuclei_scan.run(ctx, assets, sf, config)
+
+        assert len(findings) == 1
+        assert findings[0].severity in {"high", "critical", "medium", "low", "info"}
+
+
+# ── scan_task async pipeline tests (increase coverage) ──────────────────────
+
+class TestAsyncScanPipeline:
+    @pytest.mark.asyncio
+    async def test_async_scan_pipeline_happy_path(self):
+        from backend.services.core_engine.scan_task import _async_scan_pipeline
+
+        payload = {
+            "program_id": str(uuid.uuid4()),
+            "scope": {"in_scope": [{"asset_type": "domain", "value": "example.com"}], "out_of_scope": []},
+            "feature_flags": {"nuclei": False},
+        }
+
+        # Fake redis lock
+        class _Lock:
+            def __init__(self, acquire_ok=True):
+                self._ok = acquire_ok
+
+            async def acquire(self):
+                return self._ok
+
+            async def release(self):
+                return True
+
+        class _Redis:
+            def lock(self, *args, **kwargs):
+                return _Lock(acquire_ok=True)
+
+        # Fake session context manager
+        class _SessionCM:
+            async def __aenter__(self):
+                return AsyncMock()
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return None
+
+        # Fake repo/publisher
+        fake_repo = AsyncMock()
+        fake_repo.create_or_resume_scan = AsyncMock(return_value=str(uuid.uuid4()))
+        fake_repo.save_assets = AsyncMock()
+        fake_repo.save_endpoints = AsyncMock()
+        fake_repo.save_js_asset = AsyncMock()
+        fake_repo.record_stage = AsyncMock()
+        fake_repo.mark_scan_complete = AsyncMock()
+        fake_repo.save_findings = AsyncMock(return_value=0)
+
+        fake_publisher = AsyncMock()
+        fake_publisher.connect = AsyncMock()
+
+        with patch("redis.asyncio.from_url", return_value=_Redis()), \
+             patch("backend.services.core_engine.scan_task.get_session", return_value=_SessionCM()), \
+             patch("backend.services.core_engine.scan_task.ScanRepository", return_value=fake_repo), \
+             patch("backend.services.core_engine.scan_task.QueuePublisher", return_value=fake_publisher), \
+             patch("backend.services.core_engine.scan_task.asset_discovery.run", new=AsyncMock(return_value=[])), \
+             patch("backend.services.core_engine.scan_task.aggregator.run", new=AsyncMock(return_value={})):
+            await _async_scan_pipeline(payload)
+
+        assert fake_repo.create_or_resume_scan.called
+
+    @pytest.mark.asyncio
+    async def test_async_scan_pipeline_lock_held_skips(self):
+        from backend.services.core_engine.scan_task import _async_scan_pipeline
+
+        payload = {"program_id": str(uuid.uuid4()), "scope": {"in_scope": ["example.com"], "out_of_scope": []}, "feature_flags": {}}
+
+        class _Lock:
+            async def acquire(self):
+                return False
+
+            async def release(self):
+                return True
+
+        class _Redis:
+            def lock(self, *args, **kwargs):
+                return _Lock()
+
+        with patch("redis.asyncio.from_url", return_value=_Redis()):
+            await _async_scan_pipeline(payload)
