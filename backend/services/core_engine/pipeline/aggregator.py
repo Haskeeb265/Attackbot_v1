@@ -9,9 +9,9 @@ from backend.shared.queue import QueuePublisher
 from backend.shared.schemas.report_jobs import build_report_job_message, ReportJobsPayload, SeverityBreakdown
 from backend.shared.logging import get_logger
 
-logger = get_logger("core_engine.stage7")
+logger = get_logger("core_engine.stage10")
 
-STAGE_NUMBER = 7.0
+STAGE_NUMBER = 10.0
 STAGE_NAME = "aggregation"
 
 
@@ -22,7 +22,7 @@ async def run(
     publisher: QueuePublisher,
 ) -> dict:
     """
-    Stage 7: Deduplication, persistence, vulnerability grouping, scan finalization.
+    Stage 10: Deduplication, persistence, vulnerability grouping, scan finalization.
     Returns severity_breakdown dict.
     Raises on fatal failure (e.g., DB down) — caller marks scan failed_internal.
     """
@@ -105,7 +105,7 @@ async def run(
             raise RuntimeError("report.jobs publish returned False")
         await repo.record_stage(
             ctx.scan_id,
-            7.1,
+            10.1,
             "report_handoff",
             "completed",
             handoff_started_at,
@@ -116,7 +116,7 @@ async def run(
     except Exception as e:
         await repo.record_stage(
             ctx.scan_id,
-            7.1,
+            10.1,
             "report_handoff",
             "failed",
             handoff_started_at,
@@ -125,7 +125,7 @@ async def run(
         logger.error("Failed to publish to report.jobs",
                      scan_id=ctx.scan_id, error=str(e))
 
-    logger.info("Stage 7 complete",
+    logger.info("Stage 10 complete",
                 scan_id=ctx.scan_id,
                 findings_saved=saved_count,
                 status=status,

@@ -179,7 +179,7 @@ async def _execute_pipeline(
 ) -> None:
     """
     Ordered pipeline execution. Stages 4 and 5 run in parallel.
-    Stage failures are non-fatal unless Stage 0 (scope) or Stage 7 (aggregation) fail.
+    Stage failures are non-fatal unless Stage 0 (scope) or Stage 10 (aggregation) fail.
     """
     scan_id = ctx.scan_id
 
@@ -299,5 +299,5 @@ async def _execute_pipeline(
                                 s6_start, error_detail=str(e))
         logger.warning("Stage 6 failed — continuing", scan_id=scan_id, error=str(e))
 
-    # ── Stage 7: Aggregation (FATAL if fails) ───────────────────────────
+    # ── Stage 10: Aggregation (FATAL if fails) ──────────────────────────
     await aggregator.run(ctx, scan_result, repo, publisher)

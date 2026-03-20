@@ -12,7 +12,7 @@
 |---|------|--------|-----------|
 | M1 | Solid Ground | ✅ Complete | 2026-03-10 |
 | M2 | Eyes Open | ✅ Complete | 2026-03-11 |
-| M3 | First Strike | Complete | 2026-03-18 |
+| M3 | First Strike | ✅ Complete | 2026-03-18 |
 | M4 | Read the Room | 🔲 Not started | — |
 | M5 | Get Inside | 🔲 Not started | — |
 | M6 | Break the Logic | 🔲 Not started | — |
@@ -306,6 +306,5 @@ See `docs/Issues.md` for the current, prioritized gap list.
 |---|-------|----------|-----------------|
 | 1 | `api-gateway` is a skeleton — no routing, no auth, no rate limiting | Low | M10 |
 | 2 | Most Celery workers are boundary validators/skeletons; core-engine worker is implemented | Low | M3-M10 per worker |
-| 3 | RabbitMQ queues declared lazily at worker startup — DLQ topology not verified | Low | M3 |
-| 4 | `vault-init` one-shot populates placeholder secrets only | Low | M2 (real HackerOne credentials) |
-| 5 | `001_initial_schema` programs/scans tables are minimal proof-of-life only | Low | M2 (replaced by 002) |
+| 3 | `vault-init` one-shot populates placeholder secrets only | Low | M10 |
+| 4 | Tempo runs with default config; no custom tracing or alerting rules | Low | M10 |

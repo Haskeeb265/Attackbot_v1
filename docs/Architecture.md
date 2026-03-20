@@ -1,6 +1,6 @@
 # 🤖 AttackBot — Production-Level Low-Level Architecture
 
-> **Version:** 1.0 &nbsp;|&nbsp; **Date:** 2026-03-010 &nbsp;|&nbsp; **Scope:** Full backend platform for automated bug bounty discovery and reporting
+> **Version:** 1.0 &nbsp;|&nbsp; **Date:** 2026-03-10 &nbsp;|&nbsp; **Scope:** Full backend platform for automated bug bounty discovery and reporting
 
 ---
 
@@ -257,6 +257,7 @@ partial_detail      JSONB
 error_detail        TEXT
 finding_count       INTEGER
 severity_breakdown  JSONB
+retry_count         INTEGER
 started_at          TIMESTAMPTZ
 completed_at        TIMESTAMPTZ
 created_at          TIMESTAMPTZ
@@ -304,7 +305,7 @@ requires_auth       BOOLEAN
 discovered_at       TIMESTAMPTZ
 ```
 
-#### `api_schemas`
+#### `api_schemas` *(planned: M6)*
 ```
 schema_id           UUID        PK
 asset_id            UUID        FK
@@ -319,14 +320,14 @@ parsed_at           TIMESTAMPTZ
 js_asset_id         UUID        PK
 scan_id             UUID        FK
 url                 VARCHAR
-content_hash        VARCHAR     UNIQUE
+content_hash        VARCHAR     UNIQUE (nullable)
 storage_path        VARCHAR
 size_bytes          INTEGER
 analyzed            BOOLEAN
 discovered_at       TIMESTAMPTZ
 ```
 
-#### `browser_sessions`
+#### `browser_sessions` *(planned: M5)*
 ```
 session_id          UUID        PK
 scan_id             UUID        FK
@@ -360,6 +361,8 @@ is_verified         BOOLEAN
 is_false_positive   BOOLEAN
 false_positive_reason TEXT
 deduplication_hash  VARCHAR
+source              VARCHAR
+raw_output          JSONB
 created_at          TIMESTAMPTZ
 ```
 
@@ -384,7 +387,7 @@ finding_ids         UUID[]
 created_at          TIMESTAMPTZ
 ```
 
-#### `exploit_chains`
+#### `exploit_chains` *(planned: M8)*
 ```
 chain_id            UUID        PK
 scan_id             UUID        FK
@@ -401,7 +404,7 @@ created_at          TIMESTAMPTZ
 
 ### 5.3 Reporter Domain
 
-#### `reports`
+#### `reports` *(planned: M4)*
 ```
 report_id           UUID        PK
 scan_id             UUID        FK
@@ -415,7 +418,7 @@ generated_at        TIMESTAMPTZ
 created_at          TIMESTAMPTZ
 ```
 
-#### `reproduction_packs`
+#### `reproduction_packs` *(planned: M4)*
 ```
 pack_id             UUID        PK
 finding_id          UUID        FK
@@ -639,18 +642,30 @@ Stage 0    Scope Filter
 Stage 1    Asset Discovery
 Stage 2    Fingerprinting
 Stage 3    Enumeration
-Stage 3.5  Browser Session Bootstrap
+Stage 3.5  Browser Session Bootstrap       (planned: M5)
 Stage 4    Nuclei Scanning
-Stage 4.5  API Fuzzing
+Stage 4.5  API Fuzzing                     (planned: M6)
 Stage 5    Web Vulnerability Tests
 Stage 6    JS Analysis
-Stage 7    Behavioral Scenario Execution
-Stage 8    Exploit Verification
-Stage 9    AI Hypothesis
-Stage 10   Aggregation + Graph
+Stage 7    Behavioral Scenario Execution   (planned: M9)
+Stage 8    Exploit Verification            (planned: M7)
+Stage 9    AI Hypothesis                   (planned: M10)
+Stage 10   Aggregation + Graph             (graph: M8)
 ```
 
-**Parallelism model:**
+**Parallelism model (current implementation):**
+
+| Group | Stages |
+|---|---|
+| Group A | 4, 5 |
+
+**Sequential execution:**
+
+```
+Stages 1 → 2 → 3 → (4 ∥ 5) → 6 → 10
+```
+
+**Future parallelism (M6+):**
 
 | Group | Stages |
 |---|---|
@@ -658,7 +673,7 @@ Stage 10   Aggregation + Graph
 | Group B | 5, 6 |
 | Group C | 7 |
 
-**Sequential execution:**
+**Future sequential:**
 
 ```
 Stage 8 → Stage 9 → Stage 10
@@ -666,7 +681,7 @@ Stage 8 → Stage 9 → Stage 10
 
 ---
 
-## 9. 🕸️ Attack Graph Data Model
+## 9. 🕸️ Attack Graph Data Model *(planned: M8 — not yet implemented)*
 
 ### Node Types
 
@@ -828,14 +843,16 @@ Scraper
 
 ### Migration Plan
 
-| Revision | Tables |
-|---|---|
-| 001 | programs |
-| 002 | scans |
-| 003 | scan data |
-| 004 | findings |
-| 005 | chains |
-| 006 | reporter |
+| Revision | Tables | Status |
+|---|---|---|
+| 001 | programs, scans (proof of life) | ✅ Applied |
+| 002 | programs (full), program_scopes, program_policies | ✅ Applied |
+| 003 | scans (extended), scan_stages, assets, endpoints, js_assets, findings, finding_evidence, vulnerability_groups | ✅ Applied |
+| 004 | reports, reproduction_packs | 🔲 Planned (M4) |
+| 005 | browser_sessions | 🔲 Planned (M5) |
+| 006 | api_schemas | 🔲 Planned (M6) |
+| 007 | finding_evidence (extended) | 🔲 Planned (M7) |
+| 008 | exploit_chains | 🔲 Planned (M8) |
 
 ---
 

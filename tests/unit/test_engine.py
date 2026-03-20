@@ -491,7 +491,7 @@ class TestPassiveSensitiveFindings:
         assert findings[0].vulnerability_type == "sensitive_file_exposure"
 
 
-# ── Aggregator (Stage 7) tests ─────────────────────────────────────────────
+# ── Aggregator (Stage 10) tests ────────────────────────────────────────────
 
 class TestAggregator:
     @pytest.mark.asyncio
