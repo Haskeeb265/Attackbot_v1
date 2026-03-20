@@ -1,8 +1,8 @@
 # AttackBot — Project Progress
 
-> Last updated: 2026-03-18
-> Current state: **M3 verification is complete and passing (unit + integration + M3 verification suite). See `docs/M3_Verification_Runbook.md`.**
-> Last verified test snapshot: **2026-03-18 - unit: 141 passed; M3 verification: 4 passed; integrations: 15 passed, 13 skipped (skips require `INTEGRATION_TARGET`, `DATABASE_URL`, and/or `HACKERONE_API_USERNAME`/`HACKERONE_API_TOKEN`).**
+> Last updated: 2026-03-20
+> Current state: **M3 implementation is in repo; M4+ remains planned. M3 verification runbook exists at `docs/M3_Verification_Runbook.md`.**
+> Test inventory (repo): **unit: 141; integrations: 28 (includes M3 verification: 4).** Skips require `INTEGRATION_TARGET`, `DATABASE_URL`, and/or `HACKERONE_API_USERNAME`/`HACKERONE_API_TOKEN`.
 
 ---
 
@@ -26,7 +26,7 @@
 ## M1 — Solid Ground ✅
 
 **Purpose:** Project foundation, infrastructure, conventions, service skeletons.
-**Outcome:** All 21 containers running healthy from cold boot with zero manual intervention.
+**Outcome:** Infra compose defines 26 services with phased startup, healthchecks, named volumes, and resource limits.
 
 ### Infrastructure
 - [x] `infra/docker-compose.yml` — 6-phase startup order, all healthchecks, named volumes, resource limits
@@ -56,26 +56,27 @@
 - [x] `script.py.mako` — migration file template
 - [x] `versions/001_initial_schema.py` — `programs` + `scans` tables (proof of life)
 
-### FastAPI Services (skeletons)
-- [x] `services/scraper/` — port 8001, `/api/v1/health` returning healthy ✅
-- [x] `services/core_engine/` — port 8002, `/api/v1/health` returning healthy ✅
-- [x] `services/reporter/` — port 8003, `/api/v1/health` returning healthy ✅
-- [x] `services/attack_graph_engine/` — port 8006, `/api/v1/health` returning healthy ✅
-- [x] `services/api_gateway/` — port 8000, `/api/v1/health` returning healthy ✅
+### FastAPI Services (initial skeletons; some now implemented)
+- [x] `backend/services/scraper/` — port 8001, `/api/v1/health` returning healthy ✅
+- [x] `backend/services/core_engine/` — port 8002, `/api/v1/health` returning healthy ✅
+- [x] `backend/services/reporter/` — port 8003, `/api/v1/health` returning healthy ✅
+- [x] `backend/services/attack_graph_engine/` — port 8006, `/api/v1/health` returning healthy ✅
+- [x] `backend/services/api_gateway/` — port 8000, `/api/v1/health` returning healthy ✅
 
-### Celery Workers (skeletons)
-- [x] `services/core_engine/worker.py` — consumes `scan.jobs`
-- [x] `services/reporter/worker.py` — consumes `report.jobs`
-- [x] `services/browser_worker/worker.py` — consumes `browser.jobs`
-- [x] `services/api_fuzzer_worker/worker.py` — consumes `api.fuzz.jobs`
-- [x] `services/js_analysis_worker/worker.py` — consumes `js.analysis.jobs`
-- [x] `services/scenario_runner/worker.py` — consumes `scenario.jobs`
-- [x] `services/exploit_verifier/worker.py` — consumes `verify.jobs`
-- [x] `services/ai_analysis_worker/worker.py` — consumes `ai.analysis.jobs`
+### Celery Workers (initial skeletons; core-engine now implemented)
+Note: `backend/services/core_engine/worker.py` is implemented; others remain boundary validators/skeletons until their milestones.
+- [x] `backend/services/core_engine/worker.py` — consumes `scan.jobs`
+- [x] `backend/services/reporter/worker.py` — consumes `report.jobs`
+- [x] `backend/services/browser_worker/worker.py` — consumes `browser.jobs`
+- [x] `backend/services/api_fuzzer_worker/worker.py` — consumes `api.fuzz.jobs`
+- [x] `backend/services/js_analysis_worker/worker.py` — consumes `js.analysis.jobs`
+- [x] `backend/services/scenario_runner/worker.py` — consumes `scenario.jobs`
+- [x] `backend/services/exploit_verifier/worker.py` — consumes `verify.jobs`
+- [x] `backend/services/ai_analysis_worker/worker.py` — consumes `ai.analysis.jobs`
 
 ### Tests
-- [x] `tests/unit/test_shared.py` — **35/35 passing** ✅ (exceptions, health, envelope, scan_jobs, report_jobs)
-- [x] `tests/integrations/test_infra_startup.py` — **4/4 passing** ✅ (DB health, query execution, programs table, scans table)
+- [x] `tests/unit/test_shared.py` - 35 tests defined (exceptions, health, envelope, scan_jobs, report_jobs)
+- [x] `tests/integrations/test_infra_startup.py` - 4 tests defined (DB health, query execution, programs table, scans table)
 - [x] `tests/conftest.py` — singleton reset fixture
 
 ### CI
@@ -94,7 +95,7 @@
 
 **Purpose:** Build the Scraper. Real HackerOne programs flow into the database on a schedule.
 **Target outcome:** `POST /scrape/trigger` → rows in `programs` + `program_scopes` → message on `scan.jobs`.
-**Outcome:** 52/52 unit tests passing. Scraper service fully operational with scheduler, reconciler, and Redis locking.
+**Outcome:** Scraper service implemented with scheduler, reconciler, and Redis locking; 52 unit tests in repo.
 
 ### Files created
 - [x] `backend/migrations/versions/002_scraper_full.py` — full `programs`, `program_scopes`, `program_policies` schema
@@ -106,8 +107,9 @@
 - [x] `backend/services/scraper/publisher.py` — `QueuePublisher` wrapper, sets flag on publish failure
 - [x] `backend/services/scraper/reconciler.py` — APScheduler job, republishes `queued_for_scan=True` programs
 - [x] `backend/services/scraper/config.py` — scraper-specific config (HackerOne credentials, intervals)
+- [x] `backend/services/scraper/models.py`
 - [x] `backend/services/scraper/main.py` — **replaced skeleton** with full implementation (APIs + scheduler)
-- [x] `tests/unit/test_scraper.py` — **52/52 passing** ✅
+- [x] `tests/unit/test_scraper.py` - 52 tests defined
 - [x] `tests/integrations/test_scraper_pipeline.py` — scrape → DB → queue publish flow
 
 ### Definition of Done
@@ -132,15 +134,15 @@
 
 **Purpose:** Core Engine unauthenticated scanning pipeline — Stages 0 through 6.
 **Target outcome:** Scan job consumed, pipeline executed, findings in database.
-**Current state:** Completed on 2026-03-18. Remaining verification items are now automated and passing.
-**Note:** Integration suite passes for scraper API + DB wiring when Docker Postgres is bound to host `5432` (local Postgres must be stopped to avoid conflicts).
+**Current state:** Completed on 2026-03-18. Verification suite is documented in `docs/M3_Verification_Runbook.md`.
+**Note:** Integration suite requires Docker Postgres bound to host `5432` (local Postgres must be stopped to avoid conflicts).
 
 ### Implemented
-- [x] `backend/migrations/versions/003_engine.py` — engine scan schema
+- [x] `backend/migrations/versions/003_engine.py` - engine schema incl. findings, finding_evidence, vulnerability_groups, assets, endpoints, js_assets, scan_stages
 - [x] Core pipeline stages 0–6 + temp Stage 7 (`backend/services/core_engine/pipeline/*`)
 - [x] Orchestration (`backend/services/core_engine/scan_task.py`, `worker.py`, `main.py`)
 - [x] Utilities (`subprocess_utils.py`, `dedup.py`, `cvss.py`, `repository.py`, `models.py`)
-- [x] Tests added (`tests/unit/test_engine.py`, `tests/integrations/test_engine_pipeline.py`)
+- [x] Tests added (`tests/unit/test_engine.py`, `tests/integrations/test_engine_pipeline.py`, `tests/integrations/test_m3_verification.py`)
 
 ### Verification To-Do
 - [x] Re-run unit tests (`python -m pytest tests\unit -v`)
@@ -276,51 +278,23 @@
 
 ## Infrastructure State
 
-### Containers (as of M1)
-| Container | Port | Status |
-|-----------|------|--------|
-| postgres | 5432 | ✅ Healthy |
-| redis | 6379 | ✅ Healthy |
-| rabbitmq | 5672 / 15672 | ✅ Healthy |
-| neo4j | 7474 / 7687 | ✅ Healthy |
-| minio | 9000 / 9001 | ✅ Healthy |
-| vault | 8200 | ✅ Healthy |
-| migrate | — | ✅ Exited 0 |
-| minio-init | — | ✅ Exited 0 |
-| vault-init | — | ✅ Exited 0 |
-| scraper | 8001 | ✅ Healthy |
-| core-engine | 8002 | ✅ Healthy |
-| reporter | 8003 | ✅ Healthy |
-| attack-graph-engine | 8006 | ✅ Healthy |
-| api-gateway | 8000 | ✅ Healthy |
-| core-worker | — | ✅ Running |
-| reporter-worker | — | ✅ Running |
-| browser-worker | — | ✅ Running |
-| api-fuzzer-worker | — | ✅ Running |
-| js-analysis-worker | — | ✅ Running |
-| scenario-runner | — | ✅ Running |
-| exploit-verifier | — | ✅ Running |
-| ai-analysis-worker | — | ✅ Running |
+### Compose Services (infra/docker-compose.yml)
+Defined services: `postgres`, `redis`, `rabbitmq`, `neo4j`, `minio`, `vault`, `migrate`, `minio-init`, `vault-init`, `scraper`, `core-engine`, `reporter`, `attack-graph-engine`, `core-worker`, `reporter-worker`, `browser-worker`, `api-fuzzer-worker`, `js-analysis-worker`, `scenario-runner`, `exploit-verifier`, `ai-analysis-worker`, `api-gateway`, `prometheus`, `grafana`, `loki`, `tempo`.
 
-### Database Migrations Applied
-| Revision | Contents | Applied |
-|----------|----------|---------|
-| 001_initial_schema | `programs`, `scans` | ✅ |
-| 002_scraper_full | Full scraper schema | ✅ |
-| 003_engine | Engine scan data | 🔲 M3 |
-| 004_findings | Findings + evidence | 🔲 M3 |
-| 005_browser_sessions | Auth sessions | 🔲 M5 |
-| 006_api_schemas | API fuzzing schema | 🔲 M6 |
-| 007_finding_evidence | Evidence bundles | 🔲 M7 |
-| 008_exploit_chains | Chain correlation | 🔲 M8 |
+### Database Migrations in Repo
+| Revision | Contents |
+|----------|----------|
+| 001_initial_schema | `programs`, `scans` (proof of life) |
+| 002_scraper_full | `programs`, `program_scopes`, `program_policies` |
+| 003_engine | scan pipeline schema incl. `assets`, `endpoints`, `js_assets`, `findings`, `finding_evidence`, `vulnerability_groups` |
 
-### MinIO Buckets
-| Bucket | Status |
+### MinIO Buckets (from `minio-init` entrypoint)
+| Bucket | Source |
 |--------|--------|
-| reports | ✅ Created |
-| evidence | ✅ Created |
-| js-assets | ✅ Created |
-| summaries | ✅ Created |
+| reports | `mc mb --ignore-existing` |
+| evidence | `mc mb --ignore-existing` |
+| js-assets | `mc mb --ignore-existing` |
+| summaries | `mc mb --ignore-existing` |
 
 ---
 
@@ -331,7 +305,7 @@ See `docs/Issues.md` for the current, prioritized gap list.
 | # | Issue | Severity | Milestone to fix |
 |---|-------|----------|-----------------|
 | 1 | `api-gateway` is a skeleton — no routing, no auth, no rate limiting | Low | M10 |
-| 2 | All Celery workers are skeletons — log receipt only | Low | M3–M10 per worker |
+| 2 | Most Celery workers are boundary validators/skeletons; core-engine worker is implemented | Low | M3-M10 per worker |
 | 3 | RabbitMQ queues declared lazily at worker startup — DLQ topology not verified | Low | M3 |
 | 4 | `vault-init` one-shot populates placeholder secrets only | Low | M2 (real HackerOne credentials) |
 | 5 | `001_initial_schema` programs/scans tables are minimal proof-of-life only | Low | M2 (replaced by 002) |
