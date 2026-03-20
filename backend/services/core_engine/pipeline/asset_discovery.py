@@ -189,6 +189,9 @@ def _extract_root_domains(in_scope: list) -> list[str]:
         if isinstance(rule, dict):
             asset_type = rule.get("asset_type", "")
             raw = rule.get("value", "")
+        elif hasattr(rule, "value"):
+            asset_type = getattr(rule, "asset_type", "")
+            raw = getattr(rule, "value", "")
         else:
             # plain string — no type info, attempt to use it
             asset_type = "domain"

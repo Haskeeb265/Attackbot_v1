@@ -1,6 +1,7 @@
 # backend/shared/queue.py
 import json
-from typing import Any
+from dataclasses import dataclass
+from typing import Any, Iterable
 
 import aio_pika
 import aio_pika.abc
@@ -44,6 +45,149 @@ class Queues:
     REPORTS_COMPLETED = "reports.completed"
 
 
+@dataclass(frozen=True)
+class QueueSpec:
+    name: str
+    dlq_name: str | None = None
+
+
+QUEUE_SPECS: dict[str, QueueSpec] = {
+    Queues.SCAN_JOBS: QueueSpec(Queues.SCAN_JOBS, Queues.SCAN_JOBS_DLQ),
+    Queues.BROWSER_JOBS: QueueSpec(Queues.BROWSER_JOBS, Queues.BROWSER_JOBS_DLQ),
+    Queues.API_FUZZ_JOBS: QueueSpec(Queues.API_FUZZ_JOBS, Queues.API_FUZZ_JOBS_DLQ),
+    Queues.JS_ANALYSIS_JOBS: QueueSpec(Queues.JS_ANALYSIS_JOBS, Queues.JS_ANALYSIS_DLQ),
+    Queues.SCENARIO_JOBS: QueueSpec(Queues.SCENARIO_JOBS, Queues.SCENARIO_JOBS_DLQ),
+    Queues.VERIFY_JOBS: QueueSpec(Queues.VERIFY_JOBS, Queues.VERIFY_JOBS_DLQ),
+    Queues.AI_ANALYSIS_JOBS: QueueSpec(Queues.AI_ANALYSIS_JOBS, Queues.AI_ANALYSIS_DLQ),
+    Queues.REPORT_JOBS: QueueSpec(Queues.REPORT_JOBS, Queues.REPORT_JOBS_DLQ),
+    Queues.REPORTS_COMPLETED: QueueSpec(Queues.REPORTS_COMPLETED),
+}
+
+
+def _resolve_queue_specs(queue_names: Iterable[str] | None = None) -> list[QueueSpec]:
+    names = list(queue_names) if queue_names is not None else list(QUEUE_SPECS.keys())
+    specs: list[QueueSpec] = []
+    for name in names:
+        spec = QUEUE_SPECS.get(name)
+        if spec is None:
+            specs.append(QueueSpec(name))
+        else:
+            specs.append(spec)
+    return specs
+
+
+async def ensure_queue_topology(
+    rabbitmq_url: str,
+    queue_names: Iterable[str] | None = None,
+) -> dict[str, dict[str, Any]]:
+    """
+    Declare durable queues and DLQs for the requested queue names.
+
+    Main queues use the default exchange and dead-letter directly into their
+    paired ``*.dlq`` queue. This keeps the topology simple while making worker
+    loss and reject paths visible to operators.
+    """
+    connection = await aio_pika.connect_robust(
+        rabbitmq_url,
+        reconnect_interval=5,
+    )
+    channel: aio_pika.abc.AbstractChannel | None = None
+    try:
+        channel = await connection.channel()
+        topology: dict[str, dict[str, Any]] = {}
+        for spec in _resolve_queue_specs(queue_names):
+            if spec.dlq_name:
+                await channel.declare_queue(spec.dlq_name, durable=True)
+                await channel.declare_queue(
+                    spec.name,
+                    durable=True,
+                    arguments={
+                        "x-dead-letter-exchange": "",
+                        "x-dead-letter-routing-key": spec.dlq_name,
+                    },
+                )
+            else:
+                await channel.declare_queue(spec.name, durable=True)
+            topology[spec.name] = {
+                "queue": spec.name,
+                "dlq": spec.dlq_name,
+                "durable": True,
+            }
+        log.info("queue_topology_ready", queues=list(topology.keys()))
+        return topology
+    finally:
+        if channel is not None:
+            await channel.close()
+        await connection.close()
+
+
+async def inspect_queue_states(
+    rabbitmq_url: str,
+    queue_names: Iterable[str] | None = None,
+) -> list[dict[str, Any]]:
+    """
+    Inspect queue existence and message counts using passive declarations.
+    """
+    connection = await aio_pika.connect_robust(
+        rabbitmq_url,
+        reconnect_interval=5,
+    )
+    channel: aio_pika.abc.AbstractChannel | None = None
+    try:
+        channel = await connection.channel()
+        states: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for spec in _resolve_queue_specs(queue_names):
+            names = [spec.name]
+            if spec.dlq_name:
+                names.append(spec.dlq_name)
+            for queue_name in names:
+                if queue_name in seen:
+                    continue
+                seen.add(queue_name)
+                try:
+                    queue = await channel.declare_queue(queue_name, passive=True)
+                    declare_ok = getattr(queue, "declaration_result", None)
+                    states.append(
+                        {
+                            "queue": queue_name,
+                            "exists": True,
+                            "messages": getattr(declare_ok, "message_count", None),
+                            "consumers": getattr(declare_ok, "consumer_count", None),
+                        }
+                    )
+                except Exception as exc:
+                    states.append(
+                        {
+                            "queue": queue_name,
+                            "exists": False,
+                            "messages": None,
+                            "consumers": None,
+                            "error": str(exc),
+                        }
+                    )
+        return states
+    finally:
+        if channel is not None:
+            await channel.close()
+        await connection.close()
+
+
+async def check_rabbitmq_health(
+    rabbitmq_url: str,
+    required_queues: Iterable[str] | None = None,
+) -> bool:
+    """
+    Return True only if RabbitMQ is reachable and all requested queues exist.
+    """
+    try:
+        states = await inspect_queue_states(rabbitmq_url, required_queues)
+    except Exception as exc:
+        log.warning("rabbitmq_health_check_failed", error=str(exc))
+        return False
+    return all(state["exists"] for state in states)
+
+
 class QueuePublisher:
     """
     Persistent RabbitMQ publisher with reconnect support.
@@ -62,12 +206,18 @@ class QueuePublisher:
         self._url = rabbitmq_url
         self._connection: aio_pika.abc.AbstractRobustConnection | None = None
         self._channel: aio_pika.abc.AbstractChannel | None = None
+        self._validated_queues: set[str] = set()
 
-    async def connect(self) -> None:
+    async def connect(
+        self,
+        bootstrap_queues: Iterable[str] | None = None,
+    ) -> None:
         """
         Establish a robust connection that auto-reconnects on failure.
         Call once at service startup.
         """
+        if bootstrap_queues is not None:
+            await ensure_queue_topology(self._url, bootstrap_queues)
         self._connection = await aio_pika.connect_robust(
             self._url,
             reconnect_interval=5,
@@ -91,6 +241,9 @@ class QueuePublisher:
         if self._channel is None:
             raise QueueConnectionError("Publisher not connected. Call connect() first.")
         try:
+            if queue_name not in self._validated_queues:
+                await self._channel.declare_queue(queue_name, passive=True)
+                self._validated_queues.add(queue_name)
             await self._channel.default_exchange.publish(
                 aio_pika.Message(
                     body=json.dumps(message).encode(),

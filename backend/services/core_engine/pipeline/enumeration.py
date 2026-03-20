@@ -89,7 +89,7 @@ async def _enumerate_asset(
         if ep.full_url.lower().endswith(".js") and scope_filter.is_in_scope(ep.full_url)
     ]
     for js_url in js_urls:
-        js = await _download_and_store_js(ctx, js_url, config)
+        js = await _download_and_store_js(ctx, js_url, scope_filter, config)
         if js:
             out_js_assets.append(js)
 
@@ -225,6 +225,7 @@ async def _run_waybackurls(
 async def _download_and_store_js(
     ctx: ScanContext,
     js_url: str,
+    scope_filter: ScopeFilter,
     config,
 ) -> DiscoveredJsAsset | None:
     timeout_s = int(getattr(config, "js_download_timeout_seconds", 30))
@@ -234,6 +235,10 @@ async def _download_and_store_js(
         async with httpx_client.AsyncClient(timeout=timeout_s, follow_redirects=True) as client:
             resp = await client.get(js_url)
             if resp.status_code != 200:
+                return None
+            final_url = str(resp.url)
+            if not scope_filter.is_in_scope(final_url):
+                logger.warning("js_redirect_out_of_scope", original_url=js_url, final_url=final_url)
                 return None
             content_bytes = resp.content
     except Exception as e:
@@ -257,7 +262,7 @@ async def _download_and_store_js(
 
     return DiscoveredJsAsset(
         scan_id=_scan_id_as_uuid(ctx.scan_id),
-        url=js_url,
+        url=final_url,
         storage_path=storage_path,
         content_hash=content_hash,
         size_bytes=len(content_bytes),

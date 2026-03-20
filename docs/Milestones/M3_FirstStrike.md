@@ -3087,9 +3087,9 @@ class TestScanStateMachine:
 
 ---
 
-## Step 3.24 — Integration Test: `tests/integration/test_engine_pipeline.py`
+## Step 3.24 — Integration Test: `tests/integrations/test_engine_pipeline.py`
 
-**File:** `tests/integration/test_engine_pipeline.py`
+**File:** `tests/integrations/test_engine_pipeline.py`
 
 ```python
 """
@@ -3099,7 +3099,7 @@ Skips cleanly if INTEGRATION_TARGET is not set.
 
 Usage:
   docker run -d -p 3000:3000 bkimminich/juice-shop
-  INTEGRATION_TARGET=http://localhost:3000 pytest tests/integration/test_engine_pipeline.py -v
+  INTEGRATION_TARGET=http://localhost:3000 pytest tests/integrations/test_engine_pipeline.py -v
 """
 
 import asyncio

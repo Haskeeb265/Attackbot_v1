@@ -44,3 +44,19 @@ class BaseServiceConfig(BaseSettings):
     service_name: str = "unknown"
     log_level: str = "INFO"
     environment: str = "development"
+
+    def is_placeholder(self, field_name: str) -> bool:
+        value = getattr(self, field_name)
+        if value is None:
+            return True
+        if isinstance(value, str):
+            normalized = value.strip().lower()
+            return normalized in {"", "placeholder", "changeme", "replace-me"}
+        return False
+
+    def require_fields(self, field_names: list[str]) -> None:
+        missing = [field_name for field_name in field_names if self.is_placeholder(field_name)]
+        if missing:
+            raise RuntimeError(
+                f"{self.service_name} missing required configuration: {', '.join(missing)}"
+            )

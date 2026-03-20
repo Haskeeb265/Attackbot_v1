@@ -437,7 +437,7 @@ class TestFingerprinting:
 
 class TestEnumeration:
     @pytest.mark.asyncio
-    async def test_stage3_runs_ffuf_and_parses_output_file(self, tmp_path):
+    async def test_stage3_runs_ffuf_and_parses_output_file(self):
         from backend.services.core_engine.pipeline import enumeration
         from backend.services.core_engine.pipeline.context import ScanContext, FeatureFlags, ScopeDefinition
         from backend.services.core_engine.pipeline.scope_filter import ScopeFilter
@@ -584,7 +584,12 @@ class TestRepository:
         select_result = MagicMock()
         select_result.fetchone.return_value = None
 
-        mock_session.execute = AsyncMock(side_effect=[select_result, MagicMock()])
+        failed_result = MagicMock()
+        failed_result.fetchone.return_value = None
+
+        mock_session.execute = AsyncMock(
+            side_effect=[select_result, failed_result, MagicMock()]
+        )
         mock_session.commit = AsyncMock()
 
         repo = ScanRepository(mock_session)
@@ -843,6 +848,11 @@ class TestAsyncScanPipeline:
              patch("backend.services.core_engine.scan_task.get_session", return_value=_SessionCM()), \
              patch("backend.services.core_engine.scan_task.ScanRepository", return_value=fake_repo), \
              patch("backend.services.core_engine.scan_task.QueuePublisher", return_value=fake_publisher), \
+             patch("backend.services.core_engine.scan_task._fetch_scope_from_scraper",
+                   new=AsyncMock(return_value=ScopeDefinition(
+                       in_scope=[{"asset_type": "domain", "value": "example.com"}],
+                       out_of_scope=[],
+                   ))), \
              patch("backend.services.core_engine.scan_task.asset_discovery.run", new=AsyncMock(return_value=[])), \
              patch("backend.services.core_engine.scan_task.aggregator.run", new=AsyncMock(return_value={})):
             await _async_scan_pipeline(payload)
@@ -868,3 +878,119 @@ class TestAsyncScanPipeline:
 
         with patch("redis.asyncio.from_url", return_value=_Redis()):
             await _async_scan_pipeline(payload)
+
+
+# —— Scraper scope fetch tests ————————————————————————————————————————
+
+class TestScraperScopeFetch:
+    @pytest.mark.asyncio
+    async def test_fetch_scope_from_scraper_success(self):
+        import httpx
+        from backend.services.core_engine.scan_task import _fetch_scope_from_scraper
+        from backend.services.core_engine.config import EngineConfig
+
+        resp = httpx.Response(
+            200,
+            json={
+                "in_scope": [{"asset_type": "domain", "value": "example.com"}],
+                "out_of_scope": [],
+            },
+            request=httpx.Request("GET", "http://scraper/api/v1/programs/x/scope"),
+        )
+        mock_client = AsyncMock()
+        mock_client.get.return_value = resp
+
+        scope = await _fetch_scope_from_scraper("prog-id", EngineConfig(), client=mock_client)
+        assert scope.in_scope
+
+    @pytest.mark.asyncio
+    async def test_fetch_scope_from_scraper_empty_raises(self):
+        import httpx
+        from backend.services.core_engine.scan_task import _fetch_scope_from_scraper
+        from backend.services.core_engine.config import EngineConfig
+        from backend.shared.exceptions import ScanError
+
+        resp = httpx.Response(
+            200,
+            json={"in_scope": [], "out_of_scope": []},
+            request=httpx.Request("GET", "http://scraper/api/v1/programs/x/scope"),
+        )
+        mock_client = AsyncMock()
+        mock_client.get.return_value = resp
+
+        with pytest.raises(ScanError):
+            await _fetch_scope_from_scraper("prog-id", EngineConfig(), client=mock_client)
+
+
+# —— failed_internal retry semantics ————————————————————————————————
+
+class TestFailedInternalRetry:
+    @pytest.mark.asyncio
+    async def test_reuses_failed_internal_scan(self):
+        from backend.services.core_engine.repository import ScanRepository
+
+        mock_session = AsyncMock()
+        running_result = MagicMock()
+        running_result.fetchone.return_value = None
+        failed_result = MagicMock()
+        failed_result.fetchone.return_value = ("scan-id-1", 1)
+
+        mock_session.execute = AsyncMock(side_effect=[running_result, failed_result, MagicMock()])
+        mock_session.commit = AsyncMock()
+
+        repo = ScanRepository(mock_session)
+        scan_id = await repo.create_or_resume_scan(
+            program_id="prog-id",
+            feature_flags={},
+            priority=1,
+        )
+        assert scan_id == "scan-id-1"
+        assert mock_session.commit.called
+
+    @pytest.mark.asyncio
+    async def test_creates_new_scan_when_no_retry(self):
+        from backend.services.core_engine.repository import ScanRepository
+
+        mock_session = AsyncMock()
+        running_result = MagicMock()
+        running_result.fetchone.return_value = None
+        failed_result = MagicMock()
+        failed_result.fetchone.return_value = None
+
+        mock_session.execute = AsyncMock(side_effect=[running_result, failed_result, MagicMock()])
+        mock_session.commit = AsyncMock()
+
+        with patch("backend.services.core_engine.repository.uuid.uuid4",
+                   return_value=uuid.UUID("00000000-0000-0000-0000-000000000001")):
+            repo = ScanRepository(mock_session)
+            scan_id = await repo.create_or_resume_scan(
+                program_id="prog-id",
+                feature_flags={},
+                priority=1,
+            )
+        assert scan_id == "00000000-0000-0000-0000-000000000001"
+
+
+# —— failed_scope status handling ————————————————————————————————
+
+class TestFailedScopeStatus:
+    @pytest.mark.asyncio
+    async def test_execute_pipeline_marks_failed_scope(self):
+        from backend.services.core_engine.scan_task import _execute_pipeline
+        from backend.services.core_engine.pipeline.context import ScanContext, ScopeDefinition, FeatureFlags
+        from backend.services.core_engine.models import ScanResult
+        from backend.services.core_engine.config import EngineConfig
+
+        ctx = ScanContext(
+            scan_id="scan-id",
+            program_id="prog-id",
+            scope=ScopeDefinition(in_scope=[], out_of_scope=[]),
+            feature_flags=FeatureFlags(),
+        )
+        repo = AsyncMock()
+        publisher = AsyncMock()
+
+        await _execute_pipeline(ctx, ScanResult(), repo, publisher, EngineConfig())
+        assert repo.mark_scan_complete.called
+        kwargs = repo.mark_scan_complete.call_args.kwargs
+        assert kwargs.get("status") == "failed_scope"

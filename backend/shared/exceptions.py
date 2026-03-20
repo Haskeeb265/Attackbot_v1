@@ -78,6 +78,10 @@ class ScopeViolationError(ScanError):
     """
 
 
+class ScopeFatalError(ScanError):
+    """Raised when scope resolution fails at Stage 0."""
+
+
 class StageError(ScanError):
     """Raised when a specific pipeline stage encounters a fatal error."""
 
@@ -100,3 +104,7 @@ class ValidationError(AttackBotError):
 
 class SchemaError(AttackBotError):
     """Raised when a message envelope or schema is malformed."""
+class MessageSchemaError(SchemaError):
+    """Backward-compatible alias for schema validation failures."""
+
+

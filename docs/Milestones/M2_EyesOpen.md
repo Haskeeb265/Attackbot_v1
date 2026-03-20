@@ -1731,7 +1731,7 @@ class TestReconciler:
 
 ## Step 2.14 — Integration Test: `test_scraper_pipeline.py`
 
-**File:** `tests/integration/test_scraper_pipeline.py`
+**File:** `tests/integrations/test_scraper_pipeline.py`
 
 These tests run against the live Docker stack. They call real APIs and write to real DB.
 
@@ -1876,7 +1876,7 @@ docker run --rm `
   -v "${PWD}/backend:/app/backend" `
   -w /app `
   python:3.12-slim `
-  sh -c "pip install -q pytest pytest-asyncio pytest-cov asyncpg sqlalchemy pydantic pydantic-settings structlog aio-pika httpx faker minio hvac cryptography apscheduler redis requests && python -m pytest tests/integration/test_scraper_pipeline.py -v"
+  sh -c "pip install -q pytest pytest-asyncio pytest-cov asyncpg sqlalchemy pydantic pydantic-settings structlog aio-pika httpx faker minio hvac cryptography apscheduler redis requests && python -m pytest tests/integrations/test_scraper_pipeline.py -v"
 ```
 
 ---

@@ -26,6 +26,7 @@ from fastapi import FastAPI, HTTPException, Query
 from backend.shared.db import init_db, check_db_health
 from backend.shared.health import HealthResponse, ComponentHealth, HealthStatus
 from backend.shared.logging import configure_logging, get_logger
+from backend.shared.queue import ensure_queue_topology, check_rabbitmq_health, Queues
 
 from backend.services.scraper.config import ScraperConfig
 from backend.services.scraper.collectors.base import CollectorRegistry
@@ -137,6 +138,7 @@ async def _run_platform_scrape(platform: str) -> dict:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global _redis, _scheduler, _publisher, _repository, _reconciler
+    settings.require_fields(["database_url", "redis_url", "rabbitmq_url"])
 
     # Init DB
     init_db(settings.database_url, settings.db_pool_size, settings.db_max_overflow)
@@ -147,6 +149,7 @@ async def lifespan(app: FastAPI):
     # Init repository and publisher
     _repository = ProgramRepository()
     _publisher = ScraperPublisher(settings.rabbitmq_url, _repository)
+    await ensure_queue_topology(settings.rabbitmq_url)
     await _publisher.connect()
 
     # Init reconciler
@@ -204,12 +207,30 @@ app = FastAPI(title="AttackBot Scraper", lifespan=lifespan)
 @app.get("/api/v1/health", response_model=HealthResponse)
 async def health() -> HealthResponse:
     db_ok = await check_db_health()
-    rabbitmq_ok = _publisher is not None  # TODO: add real RabbitMQ ping in M3
+    redis_ok = False
+    if _redis is not None:
+        try:
+            redis_ok = bool(await _redis.ping())
+        except Exception:
+            redis_ok = False
+    rabbitmq_ok = await check_rabbitmq_health(
+        settings.rabbitmq_url,
+        [Queues.SCAN_JOBS],
+    )
     scheduler_ok = _scheduler is not None and _scheduler.running
+    credentials_ok = bool(
+        settings.hackerone_api_username
+        and settings.hackerone_api_token
+        and settings.hackerone_api_username.lower() != "placeholder"
+        and settings.hackerone_api_token.lower() != "placeholder"
+    )
 
     components = {
         "database": ComponentHealth(
             status=HealthStatus.HEALTHY if db_ok else HealthStatus.UNHEALTHY
+        ),
+        "redis": ComponentHealth(
+            status=HealthStatus.HEALTHY if redis_ok else HealthStatus.UNHEALTHY
         ),
         "rabbitmq": ComponentHealth(
             status=HealthStatus.HEALTHY if rabbitmq_ok else HealthStatus.UNHEALTHY
@@ -217,12 +238,21 @@ async def health() -> HealthResponse:
         "scheduler": ComponentHealth(
             status=HealthStatus.HEALTHY if scheduler_ok else HealthStatus.UNHEALTHY
         ),
+        "platform_credentials": ComponentHealth(
+            status=HealthStatus.HEALTHY if credentials_ok else HealthStatus.DEGRADED,
+            detail=(
+                None if credentials_ok
+                else "HackerOne credentials are not configured; live scraping is disabled."
+            ),
+        ),
     }
-    overall = (
-        HealthStatus.HEALTHY
-        if all(c.status == HealthStatus.HEALTHY for c in components.values())
-        else HealthStatus.UNHEALTHY
-    )
+    statuses = [component.status for component in components.values()]
+    if any(status == HealthStatus.UNHEALTHY for status in statuses):
+        overall = HealthStatus.UNHEALTHY
+    elif any(status == HealthStatus.DEGRADED for status in statuses):
+        overall = HealthStatus.DEGRADED
+    else:
+        overall = HealthStatus.HEALTHY
     return HealthResponse(
         status=overall,
         service=settings.service_name,

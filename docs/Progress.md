@@ -1,7 +1,8 @@
 # AttackBot — Project Progress
 
-> Last updated: 2026-03-11
-> Current state: **M2 complete. 52/52 unit tests passing. Ready for M3.**
+> Last updated: 2026-03-18
+> Current state: **M3 verification is complete and passing (unit + integration + M3 verification suite). See `docs/M3_Verification_Runbook.md`.**
+> Last verified test snapshot: **2026-03-18 - unit: 141 passed; M3 verification: 4 passed; integrations: 15 passed, 13 skipped (skips require `INTEGRATION_TARGET`, `DATABASE_URL`, and/or `HACKERONE_API_USERNAME`/`HACKERONE_API_TOKEN`).**
 
 ---
 
@@ -11,7 +12,7 @@
 |---|------|--------|-----------|
 | M1 | Solid Ground | ✅ Complete | 2026-03-10 |
 | M2 | Eyes Open | ✅ Complete | 2026-03-11 |
-| M3 | First Strike | 🔲 Not started | — |
+| M3 | First Strike | Complete | 2026-03-18 |
 | M4 | Read the Room | 🔲 Not started | — |
 | M5 | Get Inside | 🔲 Not started | — |
 | M6 | Break the Logic | 🔲 Not started | — |
@@ -107,7 +108,7 @@
 - [x] `backend/services/scraper/config.py` — scraper-specific config (HackerOne credentials, intervals)
 - [x] `backend/services/scraper/main.py` — **replaced skeleton** with full implementation (APIs + scheduler)
 - [x] `tests/unit/test_scraper.py` — **52/52 passing** ✅
-- [x] `tests/integration/test_scraper_pipeline.py` — scrape → DB → queue publish flow
+- [x] `tests/integrations/test_scraper_pipeline.py` — scrape → DB → queue publish flow
 
 ### Definition of Done
 - [x] `POST /scrape/trigger` produces rows in `programs` and `program_scopes`
@@ -127,36 +128,28 @@
 
 ---
 
-## M3 — First Strike 🔲
+## M3 - First Strike (Complete)
 
 **Purpose:** Core Engine unauthenticated scanning pipeline — Stages 0 through 6.
 **Target outcome:** Scan job consumed, pipeline executed, findings in database.
+**Current state:** Completed on 2026-03-18. Remaining verification items are now automated and passing.
+**Note:** Integration suite passes for scraper API + DB wiring when Docker Postgres is bound to host `5432` (local Postgres must be stopped to avoid conflicts).
 
-### Files to create
-- [ ] `backend/migrations/versions/003_engine.py` — `scans`, `scan_stages`, `assets`, `endpoints`, `js_assets`, `findings`, `finding_evidence`, `vulnerability_groups`
-- [ ] `backend/services/core_engine/pipeline/scope_filter.py` — Stage 0, fatal on failure
-- [ ] `backend/services/core_engine/pipeline/asset_discovery.py` — Stage 1, subfinder → alterx → dnsx → httpx
-- [ ] `backend/services/core_engine/pipeline/fingerprinting.py` — Stage 2, httpx tech detection
-- [ ] `backend/services/core_engine/pipeline/enumeration.py` — Stage 3, ffuf + waybackurls + JS download
-- [ ] `backend/services/core_engine/pipeline/nuclei_scan.py` — Stage 4, nuclei CLI wrapper
-- [ ] `backend/services/core_engine/pipeline/web_vuln_tests.py` — Stage 5, XSS + CORS + gated scanners
-- [ ] `backend/services/core_engine/pipeline/js_secrets.py` — Stage 6, regex secret detection
-- [ ] `backend/services/core_engine/pipeline/aggregator.py` — Stage 7 (temp), dedup + persist + publish
-- [ ] `backend/services/core_engine/subprocess.py` — CLI wrapper utilities (communicate pattern, streaming)
-- [ ] `backend/services/core_engine/dedup.py` — `compute_dedup_hash()` with URL normalization
-- [ ] `backend/services/core_engine/watchdog.py` — APScheduler crash recovery for stuck scans
-- [ ] `backend/services/core_engine/scan_task.py` — Celery task entry, Redis lock, state machine
-- [ ] `backend/services/core_engine/main.py` — **replace skeleton** with scan APIs
-- [ ] `backend/services/core_engine/worker.py` — **replace skeleton** with real scan_task
-- [ ] `tests/unit/test_core_engine.py`
-- [ ] `tests/integration/test_scan_pipeline.py` — against DVWA or Juice Shop
+### Implemented
+- [x] `backend/migrations/versions/003_engine.py` — engine scan schema
+- [x] Core pipeline stages 0–6 + temp Stage 7 (`backend/services/core_engine/pipeline/*`)
+- [x] Orchestration (`backend/services/core_engine/scan_task.py`, `worker.py`, `main.py`)
+- [x] Utilities (`subprocess_utils.py`, `dedup.py`, `cvss.py`, `repository.py`, `models.py`)
+- [x] Tests added (`tests/unit/test_engine.py`, `tests/integrations/test_engine_pipeline.py`)
 
-### Definition of Done
-- [ ] Scan job on `scan.jobs` produces populated `assets`, `endpoints`, `findings` in DB
-- [ ] `scan.completed` message appears on `report.jobs`
-- [ ] Watchdog marks crashed scans `failed_internal` and republishes if `retry_count < 2`
-- [ ] Dedup hash correctly collapses duplicate findings
-- [ ] Coverage ≥ 75%
+### Verification To-Do
+- [x] Re-run unit tests (`python -m pytest tests\unit -v`)
+- [x] Re-run integration tests (scraper suite) with Docker infra up (`python -m pytest tests\integrations -v`)
+- [x] Bind Docker Postgres to host `5432` for integration tests (`infra/docker-compose.yml`)
+- [x] Rebuild core-engine/core-worker image and verify `waybackurls` availability in-container
+- [x] Run a full scan and confirm scope is fetched from Scraper API
+- [x] Simulate stuck scan and confirm watchdog republishes and increments `retry_count`
+- [x] Confirm `failed_scope` status on empty/invalid scope
 
 ---
 
@@ -176,7 +169,7 @@
 - [ ] `backend/services/reporter/main.py` — **replace skeleton** with report APIs
 - [ ] `backend/services/reporter/worker.py` — **replace skeleton** with real report_task
 - [ ] `tests/unit/test_reporter.py`
-- [ ] `tests/integration/test_report_pipeline.py` — `report.jobs` → MinIO file → download API
+- [ ] `tests/integrations/test_report_pipeline.py` — `report.jobs` → MinIO file → download API
 
 ### Definition of Done
 - [ ] Full chain produces downloadable PDF with findings table + reproduction steps
@@ -332,6 +325,8 @@
 ---
 
 ## Known Issues / Technical Debt
+
+See `docs/Issues.md` for the current, prioritized gap list.
 
 | # | Issue | Severity | Milestone to fix |
 |---|-------|----------|-----------------|

@@ -44,12 +44,6 @@ async def recover_stuck_scans(republish_fn, stale_hours: int = 2) -> None:
             if retry_count < 2:
                 try:
                     await republish_fn(program_id=str(program_id))
-                    await session.execute(
-                        text("UPDATE scans SET retry_count = retry_count + 1 "
-                             "WHERE scan_id = :scan_id"),
-                        {"scan_id": str(scan_id)},
-                    )
-                    await session.commit()
                     logger.info("Watchdog: republished scan for retry",
                                 scan_id=str(scan_id))
                 except Exception as e:

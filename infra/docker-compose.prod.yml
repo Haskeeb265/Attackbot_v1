@@ -1,0 +1,17 @@
+# Production overlay: remove dev-only port exposures
+
+services:
+  postgres:
+    ports: []
+
+  rabbitmq:
+    ports: []
+
+  scraper:
+    ports: []
+
+  core-engine:
+    ports: []
+
+  grafana:
+    ports: []

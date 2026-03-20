@@ -1,5 +1,7 @@
 import asyncio
 from datetime import datetime, timezone
+import httpx
+from pydantic import ValidationError
 
 from backend.services.core_engine.pipeline.context import (
     ScanContext, ScopeDefinition, FeatureFlags
@@ -19,13 +21,18 @@ from backend.services.core_engine.repository import ScanRepository
 from backend.services.core_engine.config import EngineConfig
 from backend.shared.db import get_session
 from backend.shared.queue import QueuePublisher
-from backend.shared.schemas.envelope import MessageEnvelope
 from backend.shared.logging import get_logger
+from backend.shared.exceptions import ScanError
+from backend.shared.schemas.scan_jobs import (
+    ScanJobsPayload,
+    ScopeDefinition as SharedScopeDefinition,
+)
+from backend.shared.storage import init_storage
 
 logger = get_logger("core_engine.scan_task")
 
 
-def run_scan_task(payload: dict) -> None:
+def run_scan_task(payload: ScanJobsPayload | dict) -> None:
     """
     Celery task entry point. Synchronous wrapper around the async pipeline.
     Called by the Celery worker when a message arrives on scan.jobs.
@@ -33,7 +40,44 @@ def run_scan_task(payload: dict) -> None:
     asyncio.run(_async_scan_pipeline(payload))
 
 
-async def _async_scan_pipeline(payload: dict) -> None:
+async def _fetch_scope_from_scraper(
+    program_id: str,
+    config: EngineConfig,
+    client: httpx.AsyncClient | None = None,
+) -> SharedScopeDefinition:
+    """
+    Fetch scope from Scraper API and return ScopeDefinition.
+    Raises ScanError if scope is missing or the API call fails.
+    """
+    close_client = False
+    if client is None:
+        client = httpx.AsyncClient(
+            base_url=config.scraper_api_url,
+            timeout=config.scraper_api_timeout_seconds,
+        )
+        close_client = True
+    try:
+        resp = await client.get(f"/api/v1/programs/{program_id}/scope")
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception as e:
+        raise ScanError(f"Scope fetch failed: {e}") from e
+    finally:
+        if close_client:
+            await client.aclose()
+
+    try:
+        return SharedScopeDefinition.model_validate(
+            {
+                "in_scope": data.get("in_scope") or [],
+                "out_of_scope": data.get("out_of_scope") or [],
+            }
+        )
+    except ValidationError as e:
+        raise ScanError(f"Scope definition invalid: {e}") from e
+
+
+async def _async_scan_pipeline(payload: ScanJobsPayload | dict) -> None:
     """
     Full async pipeline. Any unhandled exception here marks the scan failed_internal.
     Redis lock prevents concurrent scans for the same program.
@@ -43,7 +87,15 @@ async def _async_scan_pipeline(payload: dict) -> None:
     config = EngineConfig()
     from backend.shared.db import init_db
     init_db(config.database_url)
-    program_id = payload.get("program_id")
+    init_storage(
+        endpoint=config.minio_endpoint,
+        access_key=config.minio_access_key,
+        secret_key=config.minio_secret_key,
+        secure=config.minio_secure,
+    )
+    if not isinstance(payload, ScanJobsPayload):
+        payload = ScanJobsPayload.model_validate(payload)
+    program_id = str(payload.program_id)
     scan_id = None
 
     # Redis lock — one scan per program at a time
@@ -59,43 +111,44 @@ async def _async_scan_pipeline(payload: dict) -> None:
         async with get_session() as session:
             repo = ScanRepository(session)
 
-            # Build scan context from message
-            scope_raw = payload.get("scope", {})
-            scope = ScopeDefinition(
-                in_scope=scope_raw.get("in_scope", []),
-                out_of_scope=scope_raw.get("out_of_scope", []),
-            )
-            flags_raw = payload.get("feature_flags", {})
-            feature_flags = FeatureFlags(
-                sqli=flags_raw.get("sqli", False),
-                ssrf=flags_raw.get("ssrf", False),
-                crlf=flags_raw.get("crlf", False),
-                nuclei=flags_raw.get("nuclei", False),
-                browser_session=flags_raw.get("browser_session", False),
-                api_fuzzing=flags_raw.get("api_fuzzing", False),
-                ai_hypothesis=flags_raw.get("ai_hypothesis", False),
-            )
+            flags_raw = payload.feature_flags.model_dump(mode="python")
+            feature_flags = FeatureFlags.from_shared(payload.feature_flags)
 
             scan_id = await repo.create_or_resume_scan(
                 program_id=program_id,
                 feature_flags=flags_raw,
-                priority=payload.get("priority", 1),
+                priority=payload.priority,
             )
+
+            # Fetch scope from Scraper API (authoritative)
+            try:
+                shared_scope = await _fetch_scope_from_scraper(program_id, config)
+            except ScanError as e:
+                logger.error("Scope resolution failed",
+                             program_id=program_id, error=str(e))
+                await repo.mark_scan_complete(
+                    scan_id=scan_id,
+                    status="failed_scope",
+                    finding_count=0,
+                    severity_breakdown={},
+                    error_detail=str(e),
+                )
+                return
 
             ctx = ScanContext(
                 scan_id=scan_id,
                 program_id=program_id,
-                scope=scope,
+                scope=ScopeDefinition.from_shared(shared_scope),
                 feature_flags=feature_flags,
-                priority=payload.get("priority", 1),
+                priority=payload.priority,
             )
 
             scan_result = ScanResult()
-            publisher = QueuePublisher(config.rabbitmq_url)
-            await publisher.connect()
-
+            publisher = None
             try:
-                 await _execute_pipeline(ctx, scan_result, repo, publisher, config)
+                publisher = QueuePublisher(config.rabbitmq_url)
+                await publisher.connect()
+                await _execute_pipeline(ctx, scan_result, repo, publisher, config)
             except Exception as e:
                 logger.error("Pipeline fatal error",
                              scan_id=scan_id, error=str(e))
@@ -106,11 +159,15 @@ async def _async_scan_pipeline(payload: dict) -> None:
                     severity_breakdown={},
                     error_detail=str(e),
                 )
+            finally:
+                if publisher is not None:
+                    await publisher.close()
     finally:
         try:
             await lock.release()
         except Exception:
             pass
+        await redis.aclose()
 
 
 async def _execute_pipeline(
@@ -128,7 +185,18 @@ async def _execute_pipeline(
 
     # ── Stage 0: Scope Filter (FATAL) ───────────────────────────────────
     logger.info("Stage 0: Scope filter", scan_id=scan_id)
-    scope_filter = ScopeFilter(ctx.scope)  # raises ScanError if scope empty
+    try:
+        scope_filter = ScopeFilter(ctx.scope)  # raises ScanError if scope empty
+    except ScanError as e:
+        logger.error("Stage 0 failed_scope", scan_id=scan_id, error=str(e))
+        await repo.mark_scan_complete(
+            scan_id=scan_id,
+            status="failed_scope",
+            finding_count=0,
+            severity_breakdown={},
+            error_detail=str(e),
+        )
+        return
 
     # ── Stage 1: Asset Discovery ─────────────────────────────────────────
     s1_start = datetime.now(timezone.utc)

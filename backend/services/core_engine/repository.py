@@ -43,6 +43,37 @@ class ScanRepository:
             logger.info("Resuming existing scan", scan_id=str(existing[0]))
             return str(existing[0])
 
+        # Check for a recent failed_internal scan eligible for retry
+        row = await self.session.execute(
+            text("""
+                SELECT scan_id, retry_count FROM scans
+                WHERE program_id = :program_id
+                  AND status = 'failed_internal'
+                  AND retry_count < 2
+                ORDER BY completed_at DESC NULLS LAST, created_at DESC
+                LIMIT 1
+            """),
+            {"program_id": program_id},
+        )
+        failed = row.fetchone()
+        if failed and len(failed) >= 2:
+            scan_id, retry_count = failed
+            await self.session.execute(
+                text("""
+                    UPDATE scans
+                    SET status = 'running',
+                        started_at = NOW(),
+                        error_detail = NULL,
+                        partial_detail = NULL
+                    WHERE scan_id = :scan_id
+                """),
+                {"scan_id": str(scan_id)},
+            )
+            await self.session.commit()
+            logger.info("Retrying failed_internal scan",
+                        scan_id=str(scan_id), retry_count=retry_count)
+            return str(scan_id)
+
         scan_id = str(uuid.uuid4())
         await self.session.execute(
             text("""

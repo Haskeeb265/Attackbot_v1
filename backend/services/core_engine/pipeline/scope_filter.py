@@ -93,11 +93,8 @@ class ScopeFilter:
         - Dict asset_type "domain" value "hackerone.com": root domain — hackerone.com + *.hackerone.com.
         - Dict asset_type "wildcard_domain" or value "*.x": wildcard — subdomains only.
         """
-        asset_type: str | None = None
-        if isinstance(rule, dict):
-            asset_type = rule.get("asset_type")
-            rule = rule.get("value") or rule.get("url") or ""
-        rule_str = str(rule).strip()
+        asset_type, rule_value = ScopeFilter._coerce_rule(rule)
+        rule_str = rule_value.strip()
         rule_domain = ScopeFilter._extract_domain(rule)
         if rule_str.startswith("*.") or asset_type == "wildcard_domain":
             # Wildcard: *.example.com matches sub.example.com only, not example.com (root)
@@ -111,6 +108,8 @@ class ScopeFilter:
     @staticmethod
     def _extract_domain(target: str) -> str:
         """Extract lowercase hostname from URL or raw domain string."""
+        if hasattr(target, "value"):
+            target = getattr(target, "value", "")
         if not isinstance(target, str):
             target = str(target)
         if "://" in target:
@@ -131,10 +130,17 @@ class ScopeFilter:
     def _parse_cidrs(rules: list[str] | list[dict]) -> list["ipaddress.IPv4Network | ipaddress.IPv6Network"]:
         networks = []
         for rule in rules:
-            if isinstance(rule, dict):
-                rule = rule.get("value") or rule.get("url") or ""
+            _, rule = ScopeFilter._coerce_rule(rule)
             try:
                 networks.append(ipaddress.ip_network(rule, strict=False))
             except ValueError:
                 pass
         return networks
+
+    @staticmethod
+    def _coerce_rule(rule: object) -> tuple[str | None, str]:
+        if isinstance(rule, dict):
+            return rule.get("asset_type"), str(rule.get("value") or rule.get("url") or "")
+        if hasattr(rule, "value"):
+            return getattr(rule, "asset_type", None), str(getattr(rule, "value", "") or "")
+        return None, str(rule or "")

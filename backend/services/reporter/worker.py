@@ -2,7 +2,10 @@
 from celery import Celery
 
 from backend.shared.config import BaseServiceConfig
+from backend.shared.exceptions import MessageSchemaError
 from backend.shared.logging import configure_logging, get_logger
+from backend.shared.schemas.envelope import MessageEnvelope
+from backend.shared.schemas.report_jobs import ReportJobsPayload
 
 
 class WorkerConfig(BaseServiceConfig):
@@ -32,10 +35,20 @@ app.conf.update(
 
 @app.task(name="reporter_worker_task", bind=True, max_retries=3)
 def reporter_worker_task(self, message: dict) -> None:  # type: ignore[misc]
-    """M1 skeleton — logs receipt, does nothing. Full implementation in M4."""
+    """Pre-M4 boundary validator for report.jobs. Full report generation lands in M4."""
+    envelope = MessageEnvelope(**message)
+    if envelope.event_type != "scan.completed":
+        raise MessageSchemaError(f"Unsupported event_type: {envelope.event_type}")
+    if envelope.get_major_version() != 1:
+        raise MessageSchemaError(
+            f"Unsupported report.jobs schema version: {envelope.schema_version}"
+        )
+    payload = ReportJobsPayload.model_validate(envelope.payload)
     log.info(
         "task_received",
         queue="report.jobs",
-        event_id=message.get("event_id"),
-        event_type=message.get("event_type"),
+        event_id=envelope.event_id,
+        event_type=envelope.event_type,
+        scan_id=str(payload.scan_id),
+        has_findings=payload.has_findings,
     )

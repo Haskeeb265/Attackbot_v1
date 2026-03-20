@@ -48,9 +48,9 @@ async def run(
 
     for js_asset in js_assets:
         try:
-            content_bytes = await download_bytes(
+            content_bytes = download_bytes(
                 bucket="js-assets",
-                key=js_asset.storage_path.removeprefix("js-assets/"),
+                object_name=js_asset.storage_path.removeprefix("js-assets/"),
             )
             content = content_bytes.decode(errors="replace")
             findings = _scan_content(content, js_asset.url)

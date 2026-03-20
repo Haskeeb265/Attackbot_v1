@@ -18,6 +18,8 @@ RUN apt-get update && apt-get install -y wget unzip curl ca-certificates && \
     unzip -q alterx_0.0.4_linux_amd64.zip alterx && mv alterx /usr/local/bin/ && rm alterx_0.0.4_linux_amd64.zip && \
     wget -q https://github.com/ffuf/ffuf/releases/download/v2.1.0/ffuf_2.1.0_linux_amd64.tar.gz && \
     tar xzf ffuf_2.1.0_linux_amd64.tar.gz ffuf && mv ffuf /usr/local/bin/ && rm ffuf_2.1.0_linux_amd64.tar.gz && \
+    wget -q https://github.com/tomnomnom/waybackurls/releases/download/v0.1.0/waybackurls-linux-amd64-0.1.0.tgz && \
+    tar xzf waybackurls-linux-amd64-0.1.0.tgz waybackurls && mv waybackurls /usr/local/bin/ && rm waybackurls-linux-amd64-0.1.0.tgz && \
     apt-get clean && rm -rf /var/lib/apt/lists/*
 
 # Nuclei templates

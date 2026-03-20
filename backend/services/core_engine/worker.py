@@ -1,10 +1,11 @@
-import json
 from celery import Celery
 
 from backend.services.core_engine.config import EngineConfig
 from backend.services.core_engine.scan_task import run_scan_task
+from backend.shared.exceptions import MessageSchemaError
 from backend.shared.logging import configure_logging, get_logger
 from backend.shared.schemas.envelope import MessageEnvelope
+from backend.shared.schemas.scan_jobs import ScanJobsPayload
 
 config = EngineConfig()
 configure_logging(config.service_name)
@@ -38,9 +39,15 @@ def scan_task(self, message: dict) -> None:
     """
     try:
         envelope = MessageEnvelope(**message)
-        payload = envelope.payload
+        if envelope.event_type != "program.scraped":
+            raise MessageSchemaError(f"Unsupported event_type: {envelope.event_type}")
+        if envelope.get_major_version() != 1:
+            raise MessageSchemaError(
+                f"Unsupported scan.jobs schema version: {envelope.schema_version}"
+            )
+        payload = ScanJobsPayload.model_validate(envelope.payload)
         logger.info("Scan task received",
-                    program_id=payload.get("program_id"),
+                    program_id=str(payload.program_id),
                     event_type=envelope.event_type)
         run_scan_task(payload)
     except Exception as e:

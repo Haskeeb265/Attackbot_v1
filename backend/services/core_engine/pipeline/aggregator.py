@@ -80,6 +80,7 @@ async def run(
     )
 
     # Publish scan.completed → report.jobs
+    handoff_started_at = datetime.now(timezone.utc)
     try:
         sev_breakdown = SeverityBreakdown(
             critical=breakdown.get("critical", 0),
@@ -99,10 +100,28 @@ async def run(
             severity_breakdown=sev_breakdown,
         )
         message = build_report_job_message(payload)
-        await publisher.publish("report.jobs", message)
+        published = await publisher.publish("report.jobs", message)
+        if not published:
+            raise RuntimeError("report.jobs publish returned False")
+        await repo.record_stage(
+            ctx.scan_id,
+            7.1,
+            "report_handoff",
+            "completed",
+            handoff_started_at,
+            output_summary={"queue": "report.jobs", "has_findings": saved_count > 0},
+        )
         logger.info("Published scan.completed to report.jobs",
                     scan_id=ctx.scan_id)
     except Exception as e:
+        await repo.record_stage(
+            ctx.scan_id,
+            7.1,
+            "report_handoff",
+            "failed",
+            handoff_started_at,
+            error_detail=str(e),
+        )
         logger.error("Failed to publish to report.jobs",
                      scan_id=ctx.scan_id, error=str(e))
 

@@ -33,12 +33,6 @@ class ScraperPublisher:
         await self._publisher.connect()
 
     async def publish_scan_job(self, program_id: UUID, program: Program) -> bool:
-        from celery import Celery
-        from backend.services.scraper.config import ScraperConfig
-
-        config = ScraperConfig()
-        celery_app = Celery(broker=config.rabbitmq_url)
-
         in_scope_scopes = [s for s in program.scopes if s.scope_type == "in_scope"]
         out_of_scope_scopes = [s for s in program.scopes if s.scope_type == "out_of_scope"]
 
@@ -75,11 +69,9 @@ class ScraperPublisher:
         )
 
         try:
-            celery_app.send_task(
-                "core_engine.scan_task",
-                args=[message],
-                queue="scan.jobs",
-            )
+            success = await self._publisher.publish(Queues.SCAN_JOBS, message)
+            if not success:
+                raise RuntimeError("publish_failed")
 
             log.info(
                 "scan_job_published",

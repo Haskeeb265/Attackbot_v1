@@ -174,7 +174,8 @@ Scope enforcement is applied **multiple times** across layers:
 ### 4.2 Network Topology
 
 - All services run inside a Docker internal network: **`attackbot-net`**
-- Only one service is exposed publicly: **`api-gateway :8000`**
+- Only one service is exposed publicly in production: **`api-gateway :8000`**
+- Local development exposes additional ports for convenience (see `infra/docker-compose.prod.yml` for the production overlay)
 - Internal management UIs:
 
 | Service | Port |
