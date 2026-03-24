@@ -24,6 +24,17 @@ STAGE_NUMBER = 3.0
 STAGE_NAME = "enumeration"
 
 
+def _effective_timeout(config, timeout_seconds: int) -> int:
+    scale_fn = getattr(config, "scaled_timeout", None)
+    timeout = int(timeout_seconds)
+    if callable(scale_fn):
+        try:
+            return int(scale_fn(timeout))
+        except Exception:
+            return timeout
+    return timeout
+
+
 async def run(
     ctx: ScanContext,
     assets: list[DiscoveredAsset],
@@ -117,7 +128,7 @@ async def _run_ffuf(
         return []
 
     wordlist = getattr(config, "ffuf_wordlist", "/wordlists/common.txt")
-    timeout = int(getattr(config, "ffuf_timeout", 600))
+    timeout = _effective_timeout(config, int(getattr(config, "ffuf_timeout", 600)))
 
     with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as tf:
         out_file = tf.name
@@ -191,7 +202,7 @@ async def _run_waybackurls(
     if not domain:
         return []
 
-    timeout = int(getattr(config, "waybackurls_timeout", 300))
+    timeout = _effective_timeout(config, int(getattr(config, "waybackurls_timeout", 300)))
     try:
         stdout, _ = await run_tool_communicate(
             args=["waybackurls", domain],

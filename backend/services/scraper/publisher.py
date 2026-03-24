@@ -1,23 +1,25 @@
 """
-Scraper publisher — wraps the shared QueuePublisher with scraper-specific failure handling.
+Scraper publisher - dispatches scan jobs as Celery tasks.
+
+Important:
+    core-worker consumes Celery task frames from scan.jobs (task name:
+    ``core_engine.scan_task``). Publishing a raw envelope to scan.jobs causes
+    Celery to treat it as an unknown message and drop it.
 
 Failure path:
-    publish() returns False → mark_queued(program_id) is called → reconciler retries later.
-
-This decouples the publish outcome from the scrape loop — a RabbitMQ outage
-doesn't lose scan jobs, it queues them for retry.
+    send_task() raises -> mark_queued(program_id) is called -> reconciler retries later.
 """
 
 from uuid import UUID
 
-from backend.shared.queue import QueuePublisher, Queues
+from backend.shared.logging import get_logger
+from backend.shared.queue import Queues
 from backend.shared.schemas.scan_jobs import (
-    build_scan_job_message,
     ScanJobsPayload,
     ScopeDefinition,
     ScopeEntry,
+    build_scan_job_message,
 )
-from backend.shared.logging import get_logger
 from backend.services.scraper.models import Program
 from backend.services.scraper.repository import ProgramRepository
 
@@ -25,16 +27,36 @@ log = get_logger(__name__)
 
 
 class ScraperPublisher:
-    def __init__(self, rabbitmq_url: str, repository: ProgramRepository):
-        self._publisher = QueuePublisher(rabbitmq_url)
+    def __init__(
+        self,
+        rabbitmq_url: str,
+        repository: ProgramRepository,
+        scan_timeout_seconds: int = 14_400,
+    ):
+        from celery import Celery
+
+        self._task_dispatcher = Celery("scraper_scan_dispatcher", broker=rabbitmq_url)
+        self._task_dispatcher.conf.update(
+            task_serializer="json",
+            accept_content=["json"],
+            result_serializer="json",
+            # Retry is handled by queued_for_scan + reconciler, not by Celery publisher retries.
+            task_publish_retry=False,
+        )
         self._repository = repository
+        self._scan_timeout_seconds = int(scan_timeout_seconds)
 
     async def connect(self) -> None:
-        await self._publisher.connect()
+        log.info(
+            "scan_job_dispatcher_ready",
+            queue=Queues.SCAN_JOBS,
+            task_name="core_engine.scan_task",
+        )
 
     async def publish_scan_job(self, program_id: UUID, program: Program) -> bool:
         in_scope_scopes = [s for s in program.scopes if s.scope_type == "in_scope"]
         out_of_scope_scopes = [s for s in program.scopes if s.scope_type == "out_of_scope"]
+        scan_timeout_seconds = int(getattr(self, "_scan_timeout_seconds", 14_400))
 
         if not in_scope_scopes:
             log.warning(
@@ -65,19 +87,25 @@ class ScraperPublisher:
                         for s in out_of_scope_scopes
                     ],
                 ),
+                scan_timeout_seconds=scan_timeout_seconds,
             )
         )
 
         try:
-            success = await self._publisher.publish(Queues.SCAN_JOBS, message)
-            if not success:
-                raise RuntimeError("publish_failed")
+            self._task_dispatcher.send_task(
+                "core_engine.scan_task",
+                args=[message],
+                queue=Queues.SCAN_JOBS,
+                serializer="json",
+            )
 
             log.info(
                 "scan_job_published",
                 handle=program.handle,
                 program_id=str(program_id),
                 in_scope_count=len(in_scope_scopes),
+                queue=Queues.SCAN_JOBS,
+                task_name="core_engine.scan_task",
             )
 
             return True

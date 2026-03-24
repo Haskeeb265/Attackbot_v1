@@ -43,6 +43,11 @@ class TestScopeFilter:
         # *.example.com should NOT match example.com itself
         assert not sf.is_in_scope("https://example.com")
 
+    def test_wildcard_asset_type_without_prefix_is_subdomain_only(self):
+        sf = self._make([{"asset_type": "wildcard_domain", "value": "example.com"}])
+        assert sf.is_in_scope("https://api.example.com")
+        assert not sf.is_in_scope("https://example.com")
+
     def test_exact_domain_match(self):
         sf = self._make(["api.example.com"])
         assert sf.is_in_scope("https://api.example.com/path")
@@ -432,6 +437,46 @@ class TestFingerprinting:
         assert captured["args"] is not None
         assert "-response-in-json" not in captured["args"]
 
+    @pytest.mark.asyncio
+    async def test_stage2_normalizes_lookup_and_uses_input_for_redirected_url(self):
+        from backend.services.core_engine.pipeline import fingerprinting
+        from backend.services.core_engine.pipeline.context import ScanContext, FeatureFlags, ScopeDefinition
+        from backend.services.core_engine.models import DiscoveredAsset
+
+        ctx = ScanContext(
+            scan_id=str(uuid.uuid4()),
+            program_id=str(uuid.uuid4()),
+            scope=ScopeDefinition(in_scope=["*.example.com"], out_of_scope=[]),
+            feature_flags=FeatureFlags(),
+        )
+        assets = [DiscoveredAsset(asset_type="url", value="https://API.Example.com/")]
+        config = MagicMock()
+        config.httpx_timeout = 5
+
+        async def fake_httpx(args, timeout, label, **kwargs):
+            return json.dumps(
+                {
+                    "input": "https://api.example.com/",
+                    "url": "https://api.example.com/login/",
+                    "status_code": 200,
+                    "tech": ["Imperva"],
+                    "title": "Example",
+                }
+            ) + "\n", ""
+
+        with patch("backend.services.core_engine.pipeline.fingerprinting.run_tool_communicate", new=fake_httpx):
+            out = await fingerprinting.run(ctx, assets, config)
+
+        assert out[0].http_status == 200
+        assert out[0].waf_detected == "Imperva"
+
+
+class TestWafDetection:
+    def test_stage1_waf_detection_uses_shared_keywords(self):
+        from backend.services.core_engine.pipeline import asset_discovery
+
+        assert asset_discovery._extract_waf({"tech": ["FortiWeb"]}) == "FortiWeb"
+
 
 # ── Enumeration (Stage 3) tests ────────────────────────────────────────────
 
@@ -804,6 +849,8 @@ class TestAsyncScanPipeline:
 
         payload = {
             "program_id": str(uuid.uuid4()),
+            "platform": "hackerone",
+            "handle": "unit-test-handle",
             "scope": {"in_scope": [{"asset_type": "domain", "value": "example.com"}], "out_of_scope": []},
             "feature_flags": {"nuclei": False},
         }
@@ -822,6 +869,9 @@ class TestAsyncScanPipeline:
         class _Redis:
             def lock(self, *args, **kwargs):
                 return _Lock(acquire_ok=True)
+
+            async def aclose(self):
+                return None
 
         # Fake session context manager
         class _SessionCM:
@@ -849,9 +899,13 @@ class TestAsyncScanPipeline:
              patch("backend.services.core_engine.scan_task.ScanRepository", return_value=fake_repo), \
              patch("backend.services.core_engine.scan_task.QueuePublisher", return_value=fake_publisher), \
              patch("backend.services.core_engine.scan_task._fetch_scope_from_scraper",
-                   new=AsyncMock(return_value=ScopeDefinition(
-                       in_scope=[{"asset_type": "domain", "value": "example.com"}],
-                       out_of_scope=[],
+                   new=AsyncMock(return_value=MagicMock(
+                       model_dump=MagicMock(
+                           return_value={
+                               "in_scope": [{"asset_type": "domain", "value": "example.com"}],
+                               "out_of_scope": [],
+                           }
+                       )
                    ))), \
              patch("backend.services.core_engine.scan_task.asset_discovery.run", new=AsyncMock(return_value=[])), \
              patch("backend.services.core_engine.scan_task.aggregator.run", new=AsyncMock(return_value={})):
@@ -863,7 +917,16 @@ class TestAsyncScanPipeline:
     async def test_async_scan_pipeline_lock_held_skips(self):
         from backend.services.core_engine.scan_task import _async_scan_pipeline
 
-        payload = {"program_id": str(uuid.uuid4()), "scope": {"in_scope": ["example.com"], "out_of_scope": []}, "feature_flags": {}}
+        payload = {
+            "program_id": str(uuid.uuid4()),
+            "platform": "hackerone",
+            "handle": "unit-test-handle",
+            "scope": {
+                "in_scope": [{"asset_type": "domain", "value": "example.com"}],
+                "out_of_scope": [],
+            },
+            "feature_flags": {},
+        }
 
         class _Lock:
             async def acquire(self):
@@ -875,6 +938,9 @@ class TestAsyncScanPipeline:
         class _Redis:
             def lock(self, *args, **kwargs):
                 return _Lock()
+
+            async def aclose(self):
+                return None
 
         with patch("redis.asyncio.from_url", return_value=_Redis()):
             await _async_scan_pipeline(payload)
@@ -994,3 +1060,294 @@ class TestFailedScopeStatus:
         assert repo.mark_scan_complete.called
         kwargs = repo.mark_scan_complete.call_args.kwargs
         assert kwargs.get("status") == "failed_scope"
+
+
+class TestStage1SeedFirstBehavior:
+    @staticmethod
+    def _base_ctx_with_scope(scope: ScopeDefinition):
+        from backend.services.core_engine.pipeline.context import FeatureFlags, ScanContext
+
+        return ScanContext(
+            scan_id=str(uuid.uuid4()),
+            program_id=str(uuid.uuid4()),
+            scope=scope,
+            feature_flags=FeatureFlags(),
+        )
+
+    @staticmethod
+    def _stage1_config():
+        cfg = MagicMock()
+        cfg.subfinder_timeout = 5
+        cfg.dnsx_timeout = 5
+        cfg.httpx_timeout = 5
+        return cfg
+
+    @pytest.mark.asyncio
+    async def test_seed_domain_flows_when_subfinder_empty(self):
+        from backend.services.core_engine.pipeline import asset_discovery
+
+        scope = ScopeDefinition(
+            in_scope=[{"asset_type": "domain", "value": "example.com"}],
+            out_of_scope=[],
+        )
+        ctx = self._base_ctx_with_scope(scope)
+        sf = ScopeFilter(scope)
+        config = self._stage1_config()
+        calls = []
+
+        async def fake_run_tool_communicate(args, timeout, label, **kwargs):
+            tool = args[0]
+            calls.append((tool, label))
+            if tool == "subfinder":
+                out_path = args[args.index("-o") + 1]
+                with open(out_path, "w", encoding="utf-8") as handle:
+                    handle.write("")
+                return "", ""
+            if tool == "dnsx":
+                return "example.com [93.184.216.34]\n", ""
+            if tool == "httpx":
+                return json.dumps(
+                    {"url": "https://example.com", "status_code": 200, "tech": []}
+                ) + "\n", ""
+            raise AssertionError(f"Unexpected tool invocation: {tool}")
+
+        with patch(
+            "backend.services.core_engine.pipeline.asset_discovery.run_tool_communicate",
+            new=fake_run_tool_communicate,
+        ):
+            assets = await asset_discovery.run(ctx, sf, config)
+
+        assert [a.value for a in assets] == ["https://example.com"]
+        assert not any(tool == "alterx" for tool, _ in calls)
+
+    @pytest.mark.asyncio
+    async def test_alterx_runs_per_domain_only_when_subfinder_has_results(self):
+        from backend.services.core_engine.pipeline import asset_discovery
+
+        scope = ScopeDefinition(
+            in_scope=[
+                {"asset_type": "domain", "value": "alpha.example.com"},
+                {"asset_type": "domain", "value": "beta.example.com"},
+            ],
+            out_of_scope=[],
+        )
+        ctx = self._base_ctx_with_scope(scope)
+        sf = ScopeFilter(scope)
+        config = self._stage1_config()
+        alterx_labels: list[str] = []
+
+        async def fake_run_tool_communicate(args, timeout, label, **kwargs):
+            tool = args[0]
+            if tool == "subfinder":
+                domain = args[args.index("-d") + 1]
+                out_path = args[args.index("-o") + 1]
+                with open(out_path, "w", encoding="utf-8") as handle:
+                    if domain == "alpha.example.com":
+                        handle.write("sub.alpha.example.com\n")
+                    else:
+                        handle.write("")
+                return "", ""
+
+            if tool == "alterx":
+                alterx_labels.append(label)
+                return "perm.alpha.example.com\n", ""
+
+            if tool == "dnsx":
+                if label == "dnsx[alpha.example.com]":
+                    return "alpha.example.com [1.1.1.1]\nsub.alpha.example.com [1.1.1.2]\n", ""
+                if label == "dnsx[beta.example.com]":
+                    return "beta.example.com [2.2.2.2]\n", ""
+                raise AssertionError(f"Unexpected dnsx label: {label}")
+
+            if tool == "httpx":
+                if label == "httpx[alpha.example.com]":
+                    return json.dumps(
+                        {"url": "https://alpha.example.com", "status_code": 200, "tech": []}
+                    ) + "\n", ""
+                if label == "httpx[beta.example.com]":
+                    return json.dumps(
+                        {"url": "https://beta.example.com", "status_code": 200, "tech": []}
+                    ) + "\n", ""
+                raise AssertionError(f"Unexpected httpx label: {label}")
+
+            raise AssertionError(f"Unexpected tool invocation: {tool}")
+
+        with patch(
+            "backend.services.core_engine.pipeline.asset_discovery.run_tool_communicate",
+            new=fake_run_tool_communicate,
+        ):
+            assets = await asset_discovery.run(ctx, sf, config)
+
+        assert sorted(a.value for a in assets) == [
+            "https://alpha.example.com",
+            "https://beta.example.com",
+        ]
+        assert alterx_labels == ["alterx[alpha.example.com]"]
+
+    def test_domain_led_url_seed_inclusion_and_exclusion(self):
+        from backend.services.core_engine.pipeline import asset_discovery
+
+        scope = ScopeDefinition(
+            in_scope=[
+                {"asset_type": "domain", "value": "example.com"},
+                {"asset_type": "wildcard_domain", "value": "*.allowed.com"},
+                {"asset_type": "url", "value": "https://api.example.com/path"},
+                {"asset_type": "url", "value": "https://service.allowed.com/login"},
+                {"asset_type": "url", "value": "https://blocked.example.com/private"},
+                {"asset_type": "url", "value": "https://outside.example.net"},
+            ],
+            out_of_scope=[{"asset_type": "domain", "value": "blocked.example.com"}],
+        )
+        sf = ScopeFilter(scope)
+        domains, skipped = asset_discovery._extract_seed_domains(scope.in_scope, sf)
+
+        assert "example.com" in domains
+        assert "allowed.com" in domains
+        assert "api.example.com" in domains
+        assert "service.allowed.com" in domains
+        assert "blocked.example.com" not in domains
+        assert "outside.example.net" not in domains
+        assert skipped.get("url_host_not_domain_led", 0) >= 2
+
+    def test_non_web_scope_types_are_excluded_from_seed_domains(self):
+        from backend.services.core_engine.pipeline import asset_discovery
+
+        scope = ScopeDefinition(
+            in_scope=[
+                {"asset_type": "domain", "value": "example.com"},
+                {"asset_type": "mobile_app", "value": "com.example.app"},
+                {"asset_type": "api", "value": "graph-api"},
+                {"asset_type": "ip_range", "value": "10.0.0.0/24"},
+            ],
+            out_of_scope=[],
+        )
+        sf = ScopeFilter(scope)
+        domains, skipped = asset_discovery._extract_seed_domains(scope.in_scope, sf)
+
+        assert domains == ["example.com"]
+        assert skipped.get("non_web_mobile_app") == 1
+        assert skipped.get("non_web_api") == 1
+        assert skipped.get("non_web_ip_range") == 1
+
+    def test_post_httpx_dedupe_key_and_first_seen_merge_semantics(self):
+        from backend.services.core_engine.models import DiscoveredAsset
+        from backend.services.core_engine.pipeline import asset_discovery
+
+        assets = [
+            DiscoveredAsset(
+                asset_type="subdomain",
+                value="https://Example.com",
+                http_status=200,
+                technology_stack={"technologies": ["nginx"]},
+                waf_detected=None,
+            ),
+            DiscoveredAsset(
+                asset_type="subdomain",
+                value="https://example.com:443",
+                http_status=301,
+                technology_stack={"technologies": ["cloudflare"]},
+                waf_detected="cloudflare",
+            ),
+            DiscoveredAsset(
+                asset_type="subdomain",
+                value="http://example.com",
+                http_status=302,
+                technology_stack=None,
+                waf_detected=None,
+            ),
+        ]
+
+        deduped = asset_discovery._dedupe_assets_by_origin(assets)
+        assert len(deduped) == 2  # https origin + http origin are distinct
+
+        https_asset = next(asset for asset in deduped if asset.value.startswith("https://"))
+        assert https_asset.http_status == 200  # first-seen wins
+        assert https_asset.technology_stack == {"technologies": ["nginx"]}  # first-seen wins
+        assert https_asset.waf_detected == "cloudflare"  # backfilled from duplicate
+
+
+class TestNucleiDiagnostics:
+    @pytest.mark.asyncio
+    async def test_nuclei_exit_code_2_logs_diagnostics_and_raises(self, monkeypatch):
+        from backend.services.core_engine.models import DiscoveredAsset
+        from backend.services.core_engine.pipeline import nuclei_scan
+        from backend.services.core_engine.pipeline.context import FeatureFlags, ScanContext, ScopeDefinition
+        from backend.shared.exceptions import ScanError
+
+        ctx = ScanContext(
+            scan_id=str(uuid.uuid4()),
+            program_id=str(uuid.uuid4()),
+            scope=ScopeDefinition(
+                in_scope=[{"asset_type": "domain", "value": "host.docker.internal"}],
+                out_of_scope=[],
+            ),
+            feature_flags=FeatureFlags(),
+        )
+        sf = ScopeFilter(ctx.scope)
+        assets = [DiscoveredAsset(asset_type="subdomain", value="http://host.docker.internal:8888")]
+
+        cfg = MagicMock()
+        cfg.nuclei_rate_limit = 25
+        cfg.nuclei_bulk_size = 10
+        cfg.nuclei_concurrency = 10
+        cfg.nuclei_timeout = 120
+        cfg.nuclei_templates = ""
+
+        events = []
+
+        def fake_error(event, **kwargs):
+            events.append((event, kwargs))
+
+        async def fake_run_tool_communicate(*args, **kwargs):
+            raise ScanError("nuclei exited with code 2. stderr: ")
+
+        monkeypatch.setattr(nuclei_scan.logger, "error", fake_error)
+        monkeypatch.setattr(nuclei_scan, "run_tool_communicate", fake_run_tool_communicate)
+
+        with pytest.raises(ScanError):
+            await nuclei_scan.run(ctx, assets, sf, cfg)
+
+        assert events
+        event_name, fields = events[0]
+        assert event_name == "nuclei_startup_failure_detected"
+        assert fields["return_code"] == 2
+        assert fields["target_count"] == 1
+        assert fields["sample_targets"] == ["http://host.docker.internal:8888"]
+        assert fields["reason_bucket"] == "target_resolution_or_parsing"
+
+    def test_extract_return_code_supports_non_scanerror_exceptions(self):
+        from backend.services.core_engine.pipeline import nuclei_scan
+
+        class DummyError(Exception):
+            pass
+
+        exc = DummyError("subprocess failed")
+        setattr(exc, "returncode", 2)
+        assert nuclei_scan._extract_return_code(exc) == 2
+        assert nuclei_scan._extract_return_code(Exception("tool exited with code 7")) == 7
+
+
+class TestCoreWorkerStartupChecks:
+    def test_worker_startup_check_warns_and_continues(self, monkeypatch):
+        pytest.importorskip("celery")
+        from backend.services.core_engine import worker
+        from backend.services.core_engine.startup_checks import StartupCheck
+
+        warnings = []
+        infos = []
+
+        monkeypatch.setattr(
+            worker,
+            "collect_toolchain_checks",
+            lambda required_tools=("nuclei",): [
+                StartupCheck(name="nuclei", ok=False, detail="missing from PATH"),
+                StartupCheck(name="nuclei_templates", ok=False, detail="nuclei template check failed"),
+            ],
+        )
+        monkeypatch.setattr(worker.logger, "warning", lambda event, **kwargs: warnings.append((event, kwargs)))
+        monkeypatch.setattr(worker.logger, "info", lambda event, **kwargs: infos.append((event, kwargs)))
+
+        checks = worker._run_worker_startup_checks()
+
+        assert len(checks) == 2
+        assert any(event == "worker_toolchain_check_failed" for event, _ in warnings)

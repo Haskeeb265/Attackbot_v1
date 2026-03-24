@@ -96,22 +96,42 @@ async def ensure_queue_topology(
         channel = await connection.channel()
         topology: dict[str, dict[str, Any]] = {}
         for spec in _resolve_queue_specs(queue_names):
+            dlq_routing_configured = False
             if spec.dlq_name:
                 await channel.declare_queue(spec.dlq_name, durable=True)
-                await channel.declare_queue(
-                    spec.name,
-                    durable=True,
-                    arguments={
-                        "x-dead-letter-exchange": "",
-                        "x-dead-letter-routing-key": spec.dlq_name,
-                    },
-                )
+                queue_arguments = {
+                    "x-dead-letter-exchange": "",
+                    "x-dead-letter-routing-key": spec.dlq_name,
+                }
+                try:
+                    await channel.declare_queue(
+                        spec.name,
+                        durable=True,
+                        arguments=queue_arguments,
+                    )
+                    dlq_routing_configured = True
+                except Exception as exc:
+                    # Backward compatibility for already-declared queues with
+                    # mismatched arguments in long-lived RabbitMQ volumes.
+                    err_text = str(exc)
+                    if "PRECONDITION_FAILED" in err_text or "inequivalent arg" in err_text:
+                        await channel.declare_queue(spec.name, passive=True)
+                        log.warning(
+                            "queue_dead_letter_args_mismatch",
+                            queue=spec.name,
+                            dlq=spec.dlq_name,
+                            error=err_text,
+                            note="Delete/recreate queue to apply DLQ routing args",
+                        )
+                    else:
+                        raise
             else:
                 await channel.declare_queue(spec.name, durable=True)
             topology[spec.name] = {
                 "queue": spec.name,
                 "dlq": spec.dlq_name,
                 "durable": True,
+                "dlq_routing_configured": dlq_routing_configured,
             }
         log.info("queue_topology_ready", queues=list(topology.keys()))
         return topology

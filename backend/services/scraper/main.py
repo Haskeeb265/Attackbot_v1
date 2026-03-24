@@ -23,18 +23,18 @@ import redis.asyncio as aioredis
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from fastapi import FastAPI, HTTPException, Query
 
-from backend.shared.db import init_db, check_db_health
-from backend.shared.health import HealthResponse, ComponentHealth, HealthStatus
-from backend.shared.logging import configure_logging, get_logger
-from backend.shared.queue import ensure_queue_topology, check_rabbitmq_health, Queues
-
-from backend.services.scraper.config import ScraperConfig
-from backend.services.scraper.collectors.base import CollectorRegistry
 from backend.services.scraper.collectors import hackerone  # noqa: F401 — triggers registration
-from backend.services.scraper.scope_parser import ScopeParser
-from backend.services.scraper.repository import ProgramRepository
+from backend.services.scraper.collectors.base import CollectorRegistry
+from backend.services.scraper.config import ScraperConfig
+from backend.services.scraper.models import Program, ProgramScope
 from backend.services.scraper.publisher import ScraperPublisher
 from backend.services.scraper.reconciler import Reconciler
+from backend.services.scraper.repository import ProgramRepository
+from backend.services.scraper.scope_parser import ScopeParser
+from backend.shared.db import check_db_health, init_db
+from backend.shared.health import ComponentHealth, HealthResponse, HealthStatus
+from backend.shared.logging import configure_logging, get_logger
+from backend.shared.queue import Queues, check_rabbitmq_health, ensure_queue_topology
 
 settings = ScraperConfig()
 configure_logging(settings.service_name, settings.log_level)
@@ -56,7 +56,8 @@ _scope_parser: ScopeParser = ScopeParser()
 async def _run_platform_scrape(platform: str) -> dict:
     """
     Core scrape logic for one platform.
-    Acquires Redis lock, runs collector (in executor), upserts, publishes.
+    Acquires Redis lock, runs collector (in executor), and upserts metadata.
+    Does not publish scan jobs.
     Called by APScheduler and by POST /scrape/trigger.
     """
     lock_key = f"scraper:lock:{platform}"
@@ -88,7 +89,6 @@ async def _run_platform_scrape(platform: str) -> dict:
         raw_programs = await loop.run_in_executor(None, collector.fetch_listing)
 
         upserted = 0
-        published = 0
         errors = 0
 
         for raw in raw_programs:
@@ -100,12 +100,8 @@ async def _run_platform_scrape(platform: str) -> dict:
                 program = collector.normalize(raw_detail)
                 program.scopes = _scope_parser.parse(program.scopes)
 
-                program_id = await _repository.upsert(program)
+                await _repository.upsert(program)
                 upserted += 1
-
-                success = await _publisher.publish_scan_job(program_id, program)
-                if success:
-                    published += 1
 
             except Exception as e:
                 log.error("program_scrape_failed", handle=raw.handle, error=str(e))
@@ -116,19 +112,94 @@ async def _run_platform_scrape(platform: str) -> dict:
             "scrape_completed",
             platform=platform,
             upserted=upserted,
-            published=published,
             errors=errors,
         )
         return {
             "status": "completed",
             "platform": platform,
             "upserted": upserted,
-            "published": published,
+            # Startup/triggered scrape now performs metadata sync only.
+            "published": 0,
             "errors": errors,
         }
 
     finally:
         await lock.release()
+
+
+async def _publish_due_scan_jobs(batch_size: int | None = None) -> dict:
+    """
+    Publish a bounded batch of background scan jobs for programs due for rescan.
+    This path is intentionally decoupled from metadata scraping.
+    """
+    # Startup-time control flag: pause background autonomous publishing for
+    # deterministic E2E runs. This value is read from env at process start.
+    if settings.e2e_pause_reconciler:
+        log.info(
+            "scan_publish_batch_paused",
+            reason="E2E_PAUSE_RECONCILER is enabled",
+            queue=Queues.SCAN_JOBS,
+        )
+        return {
+            "status": "paused",
+            "queue": Queues.SCAN_JOBS,
+            "attempted": 0,
+            "published": 0,
+            "failed": 0,
+        }
+
+    effective_batch_size = (
+        settings.scraper_scan_publish_batch_size
+        if batch_size is None
+        else int(batch_size)
+    )
+    due_programs = await _repository.get_programs_due_for_scan(
+        interval_minutes=settings.scraper_scan_publish_interval_minutes,
+        batch_size=effective_batch_size,
+    )
+
+    published = 0
+    failed = 0
+
+    for row in due_programs:
+        program_id = row["program_id"]
+        scope_rows = await _repository.get_scope(program_id)
+        scopes = [
+            ProgramScope(
+                scope_type=scope["scope_type"],
+                asset_type=scope["asset_type"],
+                value=scope["value"],
+                notes=scope.get("notes"),
+            )
+            for scope in scope_rows
+        ]
+        program = Program(
+            platform=row["platform"],
+            handle=row["handle"],
+            name=row.get("name") or row["handle"],
+            scopes=scopes,
+        )
+
+        success = await _publisher.publish_scan_job(program_id, program)
+        if success:
+            published += 1
+        else:
+            failed += 1
+
+    log.info(
+        "scan_publish_batch_completed",
+        attempted=len(due_programs),
+        published=published,
+        failed=failed,
+        queue=Queues.SCAN_JOBS,
+    )
+    return {
+        "status": "completed",
+        "queue": Queues.SCAN_JOBS,
+        "attempted": len(due_programs),
+        "published": published,
+        "failed": failed,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -148,12 +219,27 @@ async def lifespan(app: FastAPI):
 
     # Init repository and publisher
     _repository = ProgramRepository()
-    _publisher = ScraperPublisher(settings.rabbitmq_url, _repository)
+    _publisher = ScraperPublisher(
+        settings.rabbitmq_url,
+        _repository,
+        # Startup-time evaluation from env; changes require container restart.
+        scan_timeout_seconds=settings.scaled_scan_timeout_seconds(14_400),
+    )
     await ensure_queue_topology(settings.rabbitmq_url)
     await _publisher.connect()
 
     # Init reconciler
-    _reconciler = Reconciler(_repository, _publisher, settings.reconciler_max_age_days)
+    _reconciler = Reconciler(
+        _repository,
+        _publisher,
+        settings.reconciler_max_age_days,
+        paused=settings.e2e_pause_reconciler,
+    )
+    if settings.e2e_pause_reconciler:
+        log.info(
+            "e2e_reconciler_pause_enabled",
+            note="Reconciler and background scan publish batches are paused",
+        )
 
     # Init scheduler
     _scheduler = AsyncIOScheduler()
@@ -186,6 +272,22 @@ async def lifespan(app: FastAPI):
         seconds=settings.reconciler_interval_seconds,
         id="reconciler",
         replace_existing=True,
+    )
+
+    _scheduler.add_job(
+        _publish_due_scan_jobs,
+        "interval",
+        minutes=settings.scraper_scan_publish_interval_minutes,
+        id="scan_publish_batch",
+        replace_existing=True,
+        max_instances=1,
+    )
+    log.info(
+        "scheduler_job_added",
+        job="scan_publish_batch",
+        interval_minutes=settings.scraper_scan_publish_interval_minutes,
+        batch_size=settings.scraper_scan_publish_batch_size,
+        queue=Queues.SCAN_JOBS,
     )
 
     _scheduler.start()
@@ -272,6 +374,16 @@ async def trigger_scrape(platform: str = "hackerone") -> dict:
         raise HTTPException(status_code=400, detail=f"Unknown platform: {platform!r}")
     result = await _run_platform_scrape(platform)
     return result
+
+
+@app.post("/api/v1/scan-jobs/trigger")
+async def trigger_scan_publish_batch(
+    batch_size: int | None = Query(default=None, ge=1, le=500),
+) -> dict:
+    """
+    Trigger an immediate bounded background publish batch for due programs.
+    """
+    return await _publish_due_scan_jobs(batch_size=batch_size)
 
 
 # ---------------------------------------------------------------------------

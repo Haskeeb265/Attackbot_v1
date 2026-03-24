@@ -1,5 +1,4 @@
 import ipaddress
-import re
 from typing import Optional
 from urllib.parse import urlparse
 
@@ -15,13 +14,13 @@ class ScopeFilter:
     Evaluates whether a URL, domain, or IP is within the program's declared scope.
     Built once at Stage 0 from the ScopeDefinition in the scan message.
 
-    Fatal contract: if scope is empty, raise ScanError — never proceed blind.
+    Fatal contract: if scope is empty, raise ScanError and never proceed blind.
     """
 
     def __init__(self, scope: ScopeDefinition) -> None:
         if not scope.in_scope:
             raise ScanError(
-                "Scope definition has no in_scope entries — "
+                "Scope definition has no in_scope entries - "
                 "refusing to scan without defined scope."
             )
         self._in_scope = scope.in_scope
@@ -40,7 +39,6 @@ class ScopeFilter:
         and does NOT match any out-of-scope rule.
         Out-of-scope always wins.
         """
-        # Normalize: strip scheme for domain matching
         domain = self._extract_domain(target)
         ip = self._try_parse_ip(domain)
 
@@ -51,67 +49,100 @@ class ScopeFilter:
     def filter_targets(self, targets: list[str]) -> list[str]:
         """Filter a list, keeping only in-scope targets. Logs rejections."""
         in_scope, rejected = [], []
-        for t in targets:
-            if self.is_in_scope(t):
-                in_scope.append(t)
+        for target in targets:
+            if self.is_in_scope(target):
+                in_scope.append(target)
             else:
-                rejected.append(t)
+                rejected.append(target)
         if rejected:
-            logger.warning("Out-of-scope targets removed",
-                           count=len(rejected), examples=rejected[:5])
+            logger.warning(
+                "Out-of-scope targets removed",
+                count=len(rejected),
+                examples=rejected[:5],
+            )
         return in_scope
 
-    # ── Private helpers ─────────────────────────────────────────────────
+    def is_host_in_domain_scope(self, host: str) -> bool:
+        """
+        Domain/wildcard-only scope check for hostnames.
+
+        Used by Stage 1 seed admission for asset_type=url so URL seed matching
+        reuses the same domain and wildcard behavior as scope filtering.
+        """
+        domain = self._extract_domain(host)
+        if not domain:
+            return False
+        if self._matches_any_domain_rule(domain, self._out_of_scope):
+            return False
+        return self._matches_any_domain_rule(domain, self._in_scope)
 
     def _matches_any(
         self,
         domain: str,
         ip: Optional["ipaddress.IPv4Address | ipaddress.IPv6Address"],
-        rules: list[str],
+        rules: list[str] | list[dict],
         networks: list["ipaddress.IPv4Network | ipaddress.IPv6Network"],
     ) -> bool:
         for rule in rules:
             if self._matches_rule(domain, rule):
                 return True
         if ip:
-            for net in networks:
+            for network in networks:
                 try:
-                    if ip in net:
+                    if ip in network:
                         return True
                 except TypeError:
                     continue
+        return False
+
+    def _matches_any_domain_rule(self, domain: str, rules: list[str] | list[dict]) -> bool:
+        for rule in rules:
+            asset_type, rule_value = self._coerce_rule(rule)
+            if not self._is_domain_rule(asset_type, rule_value):
+                continue
+            if self._matches_rule(domain, rule):
+                return True
         return False
 
     @staticmethod
     def _matches_rule(domain: str, rule: str | dict) -> bool:
         """
         Match a domain against a scope rule.
-        Supports: exact match, wildcard (*.example.com), root domain (domain + subdomains).
-        Rule may be a string (domain/URL) or a dict with "value" and "asset_type" (from API).
-        - String "*.example.com": wildcard — subdomains only, not root.
-        - String "api.example.com": exact — that host only.
-        - Dict asset_type "domain" value "hackerone.com": root domain — hackerone.com + *.hackerone.com.
-        - Dict asset_type "wildcard_domain" or value "*.x": wildcard — subdomains only.
+
+        Supports exact match, wildcard (*.example.com), and domain-root rules
+        (domain + subdomains) for API-style scope entries.
         """
         asset_type, rule_value = ScopeFilter._coerce_rule(rule)
         rule_str = rule_value.strip()
         rule_domain = ScopeFilter._extract_domain(rule)
-        if rule_str.startswith("*.") or asset_type == "wildcard_domain":
-            # Wildcard: *.example.com matches sub.example.com only, not example.com (root)
+        if not rule_domain:
+            return False
+
+        if asset_type == "wildcard_domain":
+            # Wildcard asset type: always subdomains-only, even if value lacks "*." prefix.
             return domain.endswith("." + rule_domain)
+
+        if rule_str.startswith("*."):
+            # Wildcard: *.example.com matches sub.example.com only.
+            return domain.endswith("." + rule_domain)
+
         if asset_type == "domain":
-            # API root domain: match domain and all subdomains
+            # Root domain rule from API: include root and all subdomains.
             return domain == rule_domain or domain.endswith("." + rule_domain)
-        # Exact: match this host only, not subdomains
+
+        # Plain string fallback: exact host match.
         return domain == rule_domain
 
     @staticmethod
-    def _extract_domain(target: str) -> str:
-        """Extract lowercase hostname from URL or raw domain string."""
+    def _extract_domain(target: str | dict) -> str:
+        """Extract lowercase hostname from URL/dict/raw host string."""
         if hasattr(target, "value"):
             target = getattr(target, "value", "")
+        if isinstance(target, dict):
+            target = str(target.get("value") or target.get("url") or "")
         if not isinstance(target, str):
             target = str(target)
+
         if "://" in target:
             parsed = urlparse(target)
             host = parsed.hostname or ""
@@ -130,9 +161,9 @@ class ScopeFilter:
     def _parse_cidrs(rules: list[str] | list[dict]) -> list["ipaddress.IPv4Network | ipaddress.IPv6Network"]:
         networks = []
         for rule in rules:
-            _, rule = ScopeFilter._coerce_rule(rule)
+            _, rule_value = ScopeFilter._coerce_rule(rule)
             try:
-                networks.append(ipaddress.ip_network(rule, strict=False))
+                networks.append(ipaddress.ip_network(rule_value, strict=False))
             except ValueError:
                 pass
         return networks
@@ -144,3 +175,21 @@ class ScopeFilter:
         if hasattr(rule, "value"):
             return getattr(rule, "asset_type", None), str(getattr(rule, "value", "") or "")
         return None, str(rule or "")
+
+    @staticmethod
+    def _is_domain_rule(asset_type: str | None, rule_value: str) -> bool:
+        if asset_type in {"domain", "wildcard_domain"}:
+            return True
+        if asset_type in {"url", "ip_range", "mobile_app", "api"}:
+            return False
+
+        # Legacy string-only rules: allow host-like values, exclude CIDRs.
+        candidate = (rule_value or "").strip()
+        if not candidate:
+            return False
+        try:
+            ipaddress.ip_network(candidate, strict=False)
+            return False
+        except ValueError:
+            pass
+        return bool(ScopeFilter._extract_domain(candidate))
