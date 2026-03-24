@@ -130,7 +130,36 @@ async def _build_payload_from_scraper(
 
 def _enqueue_scan(payload: ScanJobsPayload) -> None:
     from backend.services.core_engine.worker import scan_task
-    message = build_scan_job_message(payload, source_service=config.service_name)
+
+    effective_payload = payload
+    raw_scan_timeout = getattr(payload, "scan_timeout_seconds", None)
+    if raw_scan_timeout is None:
+        logger.warning(
+            "scan_timeout_scaling_skipped_missing_field",
+            program_id=str(payload.program_id),
+        )
+    else:
+        try:
+            effective_scan_timeout = int(
+                config.scaled_scan_timeout_seconds(int(raw_scan_timeout))
+            )
+            if effective_scan_timeout != int(raw_scan_timeout):
+                effective_payload = payload.model_copy(
+                    update={"scan_timeout_seconds": effective_scan_timeout}
+                )
+        except (TypeError, ValueError) as exc:
+            logger.warning(
+                "scan_timeout_scaling_skipped_invalid_value",
+                program_id=str(payload.program_id),
+                scan_timeout_seconds=raw_scan_timeout,
+                error=str(exc),
+            )
+            effective_payload = payload
+
+    message = build_scan_job_message(
+        effective_payload,
+        source_service=config.service_name,
+    )
     scan_task.apply_async(args=[message], queue="scan.jobs")
 
 
@@ -154,7 +183,9 @@ async def lifespan(app: FastAPI):
     )
     await ensure_queue_topology(config.rabbitmq_url)
     global _toolchain_checks
-    _toolchain_checks = collect_toolchain_checks()
+    _toolchain_checks = collect_toolchain_checks(
+        nuclei_timeout_seconds=config.nuclei_template_check_timeout_seconds
+    )
     if not startup_checks_ok(_toolchain_checks):
         failed = {
             check.name: check.detail

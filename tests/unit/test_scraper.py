@@ -10,7 +10,7 @@ Coverage target: ≥ 80% for backend/services/scraper + backend/shared/exception
 """
 
 import pytest
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, Mock, patch
 from uuid import uuid4
 
 from backend.services.scraper.models import Program, ProgramScope, RawProgram
@@ -448,11 +448,11 @@ class TestScraperPublisher:
         from backend.services.scraper.publisher import ScraperPublisher
 
         mock_repo = AsyncMock()
-        mock_queue_publisher = AsyncMock()
-        mock_queue_publisher.publish.return_value = False  # simulate failure
+        mock_task_dispatcher = Mock()
+        mock_task_dispatcher.send_task.side_effect = RuntimeError("publish_failed")
 
         publisher = ScraperPublisher.__new__(ScraperPublisher)
-        publisher._publisher = mock_queue_publisher
+        publisher._task_dispatcher = mock_task_dispatcher
         publisher._repository = mock_repo
 
         program = Program(
@@ -471,11 +471,11 @@ class TestScraperPublisher:
         from backend.services.scraper.publisher import ScraperPublisher
 
         mock_repo = AsyncMock()
-        mock_queue_publisher = AsyncMock()
-        mock_queue_publisher.publish.return_value = True
+        mock_task_dispatcher = Mock()
+        mock_task_dispatcher.send_task.return_value = Mock()
 
         publisher = ScraperPublisher.__new__(ScraperPublisher)
-        publisher._publisher = mock_queue_publisher
+        publisher._task_dispatcher = mock_task_dispatcher
         publisher._repository = mock_repo
 
         program = Program(
@@ -494,10 +494,10 @@ class TestScraperPublisher:
         from backend.services.scraper.publisher import ScraperPublisher
 
         mock_repo = AsyncMock()
-        mock_queue_publisher = AsyncMock()
+        mock_task_dispatcher = Mock()
 
         publisher = ScraperPublisher.__new__(ScraperPublisher)
-        publisher._publisher = mock_queue_publisher
+        publisher._task_dispatcher = mock_task_dispatcher
         publisher._repository = mock_repo
 
         program = Program(
@@ -509,17 +509,17 @@ class TestScraperPublisher:
         result = await publisher.publish_scan_job(uuid4(), program)
 
         assert result is False
-        mock_queue_publisher.publish.assert_not_called()
+        mock_task_dispatcher.send_task.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_publish_skipped_only_out_of_scope(self):
         from backend.services.scraper.publisher import ScraperPublisher
 
         mock_repo = AsyncMock()
-        mock_queue_publisher = AsyncMock()
+        mock_task_dispatcher = Mock()
 
         publisher = ScraperPublisher.__new__(ScraperPublisher)
-        publisher._publisher = mock_queue_publisher
+        publisher._task_dispatcher = mock_task_dispatcher
         publisher._repository = mock_repo
 
         program = Program(
@@ -531,7 +531,7 @@ class TestScraperPublisher:
         result = await publisher.publish_scan_job(uuid4(), program)
 
         assert result is False
-        mock_queue_publisher.publish.assert_not_called()
+        mock_task_dispatcher.send_task.assert_not_called()
 
 
 # ---------------------------------------------------------------------------

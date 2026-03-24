@@ -11,6 +11,7 @@ class EngineConfig(BaseServiceConfig):
 
     # Subprocess timeouts (seconds)
     subfinder_timeout: int = 600   # 5 min for testing — change back to 1800 for prod
+    alterx_timeout: int = 300
     dnsx_timeout: int = 900
     httpx_timeout: int = 600
     ffuf_timeout: int = 1800
@@ -22,6 +23,7 @@ class EngineConfig(BaseServiceConfig):
     nuclei_bulk_size: int = 25
     nuclei_concurrency: int = 25
     nuclei_templates: str = ""      # empty = default template set
+    nuclei_template_check_timeout_seconds: int = 60
 
     # ffuf settings
     ffuf_wordlist: str = "/wordlists/common.txt"

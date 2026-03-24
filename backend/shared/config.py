@@ -45,6 +45,28 @@ class BaseServiceConfig(BaseSettings):
     log_level: str = "INFO"
     environment: str = "development"
 
+    # E2E timeout scaling
+    e2e_tool_timeout_scale: float = 1.0
+    e2e_tool_timeout_floor_seconds: int = 30
+
+    def scaled_timeout(self, timeout_seconds: int) -> int:
+        """
+        Scale per-tool timeout for E2E runs while keeping production defaults readable.
+        """
+        base_timeout = max(int(timeout_seconds), 0)
+        scale = float(self.e2e_tool_timeout_scale)
+        if scale <= 0:
+            scale = 1.0
+        scaled = int(base_timeout * scale)
+        floor = max(int(self.e2e_tool_timeout_floor_seconds), 1)
+        return max(scaled, floor)
+
+    def scaled_scan_timeout_seconds(self, timeout_seconds: int) -> int:
+        """
+        Scale scan-level timeout with schema-safe minimum.
+        """
+        return max(self.scaled_timeout(timeout_seconds), 300)
+
     def is_placeholder(self, field_name: str) -> bool:
         value = getattr(self, field_name)
         if value is None:

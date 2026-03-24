@@ -9,6 +9,8 @@ from datetime import datetime, timezone
 import pytest
 from pydantic import ValidationError
 
+from backend.shared.config import BaseServiceConfig
+
 from backend.shared.exceptions import (
     AttackBotError,
     CollectorRateLimitError,
@@ -33,6 +35,19 @@ from backend.shared.schemas.scan_jobs import (
     ScopeEntry,
     build_scan_job_message,
 )
+
+class _DummyServiceConfig(BaseServiceConfig):
+    service_name: str = "dummy"
+
+
+class TestBaseServiceConfigScaling:
+    def test_scaled_timeout_respects_floor(self):
+        cfg = _DummyServiceConfig(
+            e2e_tool_timeout_scale=0.1,
+            e2e_tool_timeout_floor_seconds=30,
+        )
+        assert cfg.scaled_timeout(60) == 30
+        assert cfg.scaled_scan_timeout_seconds(60) == 300
 
 
 # ── Exception hierarchy ────────────────────────────────────────────────────

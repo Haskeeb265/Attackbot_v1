@@ -8,12 +8,14 @@ CRITICAL INVARIANT:
     Violating this invariant causes silent loss of scan jobs.
 """
 
-from uuid import UUID, uuid4
 from datetime import datetime, timezone
+from uuid import UUID, uuid4
+
 from sqlalchemy import text
+
+from backend.services.scraper.models import Program
 from backend.shared.db import get_session
 from backend.shared.logging import get_logger
-from backend.services.scraper.models import Program
 
 log = get_logger(__name__)
 
@@ -151,6 +153,78 @@ class ProgramRepository:
                   AND last_scraped_at > NOW() - INTERVAL '{max_age_days} days'
                 ORDER BY last_scraped_at DESC
             """))
+            return [dict(row._mapping) for row in result.fetchall()]
+
+    async def get_programs_due_for_scan(
+        self,
+        interval_minutes: int,
+        batch_size: int,
+    ) -> list[dict]:
+        """
+        Return active programs due for a background rescan.
+
+        Eligibility rules:
+          - has at least one non-empty in_scope entry
+          - no in-flight scan row (queued/pending/running)
+          - last terminal scan is older than interval_minutes (or never scanned)
+        """
+        async with get_session() as session:
+            result = await session.execute(
+                text(
+                    """
+                    SELECT
+                        p.program_id,
+                        p.platform,
+                        p.handle,
+                        p.name
+                    FROM programs p
+                    WHERE p.is_active = true
+                      AND EXISTS (
+                        SELECT 1
+                        FROM program_scopes ps
+                        WHERE ps.program_id = p.program_id
+                          AND ps.scope_type = 'in_scope'
+                          AND BTRIM(COALESCE(ps.value, '')) <> ''
+                      )
+                      AND NOT EXISTS (
+                        SELECT 1
+                        FROM scans s_inflight
+                        WHERE s_inflight.program_id = p.program_id
+                          AND s_inflight.status IN ('queued', 'pending', 'running')
+                      )
+                      AND COALESCE(
+                        (
+                          SELECT MAX(COALESCE(s.completed_at, s.started_at, s.created_at))
+                          FROM scans s
+                          WHERE s.program_id = p.program_id
+                            AND s.status IN (
+                              'completed',
+                              'partial',
+                              'failed_scope',
+                              'failed_internal',
+                              'failed_auth'
+                            )
+                        ),
+                        TO_TIMESTAMP(0)
+                      ) <= NOW() - make_interval(mins => :interval_minutes)
+                    ORDER BY
+                      COALESCE(
+                        (
+                          SELECT MAX(COALESCE(s_any.completed_at, s_any.started_at, s_any.created_at))
+                          FROM scans s_any
+                          WHERE s_any.program_id = p.program_id
+                        ),
+                        TO_TIMESTAMP(0)
+                      ) ASC,
+                      p.updated_at DESC
+                    LIMIT :batch_size
+                    """
+                ),
+                {
+                    "interval_minutes": interval_minutes,
+                    "batch_size": batch_size,
+                },
+            )
             return [dict(row._mapping) for row in result.fetchall()]
 
     async def get_by_id(self, program_id: UUID) -> dict | None:

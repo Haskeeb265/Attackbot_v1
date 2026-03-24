@@ -29,5 +29,10 @@ class ScraperConfig(BaseServiceConfig):
     reconciler_interval_seconds: int = 300           # 5 minutes
     reconciler_max_age_days: int = 7
 
+    # Background scan publish scheduler (decoupled from metadata sync)
+    scraper_scan_publish_interval_minutes: int = 60
+    scraper_scan_publish_batch_size: int = 10
+    e2e_pause_reconciler: bool = False
+
     # Redis distributed lock TTL to prevent concurrent scrapes of same platform
     platform_lock_ttl_seconds: int = 7200            # 2 hours

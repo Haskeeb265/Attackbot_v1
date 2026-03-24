@@ -24,16 +24,25 @@ class Reconciler:
         repository: ProgramRepository,
         publisher: ScraperPublisher,
         max_age_days: int = 7,
+        paused: bool = False,
     ):
         self._repo = repository
         self._publisher = publisher
         self._max_age_days = max_age_days
+        self._paused = paused
 
     async def reconcile(self) -> dict:
         """
         Query for queued programs, attempt republish.
         Returns summary: {"checked": N, "published": N, "failed": N}
         """
+        if self._paused:
+            log.info(
+                "reconciler_paused",
+                reason="E2E_PAUSE_RECONCILER is enabled",
+            )
+            return {"checked": 0, "published": 0, "failed": 0}
+
         queued = await self._repo.get_queued_programs(self._max_age_days)
         log.info("reconciler_started", queued_count=len(queued))
 
@@ -83,5 +92,10 @@ class Reconciler:
                     program_id=str(program_id),
                 )
 
-        log.info("reconciler_finished", published=published, failed=failed)
+        log.info(
+            "reconciler_finished",
+            checked=len(queued),
+            published=published,
+            failed=failed,
+        )
         return {"checked": len(queued), "published": published, "failed": failed}

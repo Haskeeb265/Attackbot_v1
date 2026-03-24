@@ -223,6 +223,9 @@ services:
       MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD}
       HACKERONE_API_USERNAME: ${HACKERONE_API_USERNAME}
       HACKERONE_API_TOKEN: ${HACKERONE_API_TOKEN}
+      E2E_PAUSE_RECONCILER: ${E2E_PAUSE_RECONCILER:-false}
+      E2E_TOOL_TIMEOUT_SCALE: ${E2E_TOOL_TIMEOUT_SCALE:-1.0}
+      E2E_TOOL_TIMEOUT_FLOOR_SECONDS: ${E2E_TOOL_TIMEOUT_FLOOR_SECONDS:-30}
     networks: [attackbot-net]
     restart: unless-stopped
     depends_on:
@@ -262,6 +265,8 @@ services:
       MINIO_ENDPOINT: minio:9000
       MINIO_ACCESS_KEY: ${MINIO_ROOT_USER}
       MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD}
+      E2E_TOOL_TIMEOUT_SCALE: ${E2E_TOOL_TIMEOUT_SCALE:-1.0}
+      E2E_TOOL_TIMEOUT_FLOOR_SECONDS: ${E2E_TOOL_TIMEOUT_FLOOR_SECONDS:-30}
     networks: [attackbot-net]
     restart: unless-stopped
     depends_on:
@@ -367,6 +372,8 @@ services:
       MINIO_ENDPOINT: minio:9000
       MINIO_ACCESS_KEY: ${MINIO_ROOT_USER}
       MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD}
+      E2E_TOOL_TIMEOUT_SCALE: ${E2E_TOOL_TIMEOUT_SCALE:-1.0}
+      E2E_TOOL_TIMEOUT_FLOOR_SECONDS: ${E2E_TOOL_TIMEOUT_FLOOR_SECONDS:-30}
     networks: [attackbot-net]
     restart: unless-stopped
     depends_on:
@@ -384,7 +391,7 @@ services:
       dockerfile: backend/services/reporter/Dockerfile
     command: >
       celery -A backend.services.reporter.worker worker
-      -Q report.jobs -c 1 --loglevel=info
+      -Q reporter.worker.tasks -c 1 --loglevel=info
     environment:
       SERVICE_NAME: reporter-worker
       DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
@@ -424,6 +431,8 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      core-engine:
+        condition: service_healthy
     deploy:
       resources:
         limits: { cpus: "2.0", memory: "2G" }
@@ -443,6 +452,8 @@ services:
     restart: unless-stopped
     depends_on:
       rabbitmq:
+        condition: service_healthy
+      core-engine:
         condition: service_healthy
     deploy:
       resources:
@@ -464,6 +475,8 @@ services:
     depends_on:
       rabbitmq:
         condition: service_healthy
+      core-engine:
+        condition: service_healthy
     deploy:
       resources:
         limits: { cpus: "1.0", memory: "1G" }
@@ -483,6 +496,8 @@ services:
     restart: unless-stopped
     depends_on:
       rabbitmq:
+        condition: service_healthy
+      core-engine:
         condition: service_healthy
     deploy:
       resources:
@@ -504,6 +519,8 @@ services:
     depends_on:
       rabbitmq:
         condition: service_healthy
+      core-engine:
+        condition: service_healthy
     deploy:
       resources:
         limits: { cpus: "2.0", memory: "2G" }
@@ -523,6 +540,8 @@ services:
     restart: unless-stopped
     depends_on:
       rabbitmq:
+        condition: service_healthy
+      core-engine:
         condition: service_healthy
     deploy:
       resources:
