@@ -50,6 +50,23 @@ class TestBaseServiceConfigScaling:
         assert cfg.scaled_scan_timeout_seconds(60) == 300
 
 
+class TestQueueDeadLetterArguments:
+    def test_dead_letter_args_for_primary_queue(self):
+        pytest.importorskip("aio_pika")
+        from backend.shared.queue import Queues, dead_letter_arguments
+
+        assert dead_letter_arguments(Queues.SCAN_JOBS) == {
+            "x-dead-letter-exchange": "",
+            "x-dead-letter-routing-key": Queues.SCAN_JOBS_DLQ,
+        }
+
+    def test_dead_letter_args_for_non_dlq_queue(self):
+        pytest.importorskip("aio_pika")
+        from backend.shared.queue import Queues, dead_letter_arguments
+
+        assert dead_letter_arguments(Queues.REPORTS_COMPLETED) is None
+
+
 # ── Exception hierarchy ────────────────────────────────────────────────────
 
 class TestExceptionHierarchy:

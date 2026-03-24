@@ -7,7 +7,7 @@ from kombu import Consumer, Queue
 
 from backend.shared.config import BaseServiceConfig
 from backend.shared.logging import configure_logging, get_logger
-from backend.shared.queue import Queues
+from backend.shared.queue import Queues, dead_letter_arguments
 from backend.shared.schemas.envelope import MessageEnvelope
 from backend.shared.schemas.report_jobs import ReportJobsPayload
 
@@ -161,7 +161,13 @@ class ReportJobsConsumerStep(bootsteps.ConsumerStep):
         return [
             Consumer(
                 channel,
-                queues=[Queue(Queues.REPORT_JOBS, durable=True)],
+                queues=[
+                    Queue(
+                        Queues.REPORT_JOBS,
+                        durable=True,
+                        queue_arguments=dead_letter_arguments(Queues.REPORT_JOBS),
+                    )
+                ],
                 callbacks=[_on_report_jobs_message],
                 # Core currently publishes envelopes with content_type=None.
                 # Keep accept=None so raw bodies are still delivered, then parse explicitly.

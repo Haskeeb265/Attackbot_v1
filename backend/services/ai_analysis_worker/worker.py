@@ -1,8 +1,10 @@
 # backend/services/ai_analysis_worker/worker.py
 from celery import Celery
+from kombu import Queue
 
 from backend.shared.config import BaseServiceConfig
 from backend.shared.logging import configure_logging, get_logger
+from backend.shared.queue import Queues, dead_letter_arguments
 
 
 class WorkerConfig(BaseServiceConfig):
@@ -26,7 +28,15 @@ app.conf.update(
     task_acks_late=True,
     worker_prefetch_multiplier=1,
     task_reject_on_worker_lost=True,
-    task_default_queue="ai.analysis.jobs",
+    broker_connection_retry_on_startup=True,
+    task_default_queue=Queues.AI_ANALYSIS_JOBS,
+    task_queues=(
+        Queue(
+            Queues.AI_ANALYSIS_JOBS,
+            durable=True,
+            queue_arguments=dead_letter_arguments(Queues.AI_ANALYSIS_JOBS),
+        ),
+    ),
 )
 
 
@@ -35,7 +45,7 @@ def ai_analysis_worker_task(self, message: dict) -> None:  # type: ignore[misc]
     """M1 skeleton — logs receipt, does nothing. Full implementation in M10."""
     log.info(
         "task_received",
-        queue="ai.analysis.jobs",
+        queue=Queues.AI_ANALYSIS_JOBS,
         event_id=message.get("event_id"),
         event_type=message.get("event_type"),
     )

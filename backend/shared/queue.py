@@ -64,6 +64,22 @@ QUEUE_SPECS: dict[str, QueueSpec] = {
 }
 
 
+def dead_letter_arguments(queue_name: str) -> dict[str, str] | None:
+    """
+    Return RabbitMQ queue declaration arguments for the given queue.
+
+    Main queues are configured to dead-letter directly into their paired DLQ.
+    Queues without DLQ pairing return None.
+    """
+    spec = QUEUE_SPECS.get(queue_name)
+    if spec is None or spec.dlq_name is None:
+        return None
+    return {
+        "x-dead-letter-exchange": "",
+        "x-dead-letter-routing-key": spec.dlq_name,
+    }
+
+
 def _resolve_queue_specs(queue_names: Iterable[str] | None = None) -> list[QueueSpec]:
     names = list(queue_names) if queue_names is not None else list(QUEUE_SPECS.keys())
     specs: list[QueueSpec] = []
@@ -99,10 +115,7 @@ async def ensure_queue_topology(
             dlq_routing_configured = False
             if spec.dlq_name:
                 await channel.declare_queue(spec.dlq_name, durable=True)
-                queue_arguments = {
-                    "x-dead-letter-exchange": "",
-                    "x-dead-letter-routing-key": spec.dlq_name,
-                }
+                queue_arguments = dead_letter_arguments(spec.name)
                 try:
                     await channel.declare_queue(
                         spec.name,

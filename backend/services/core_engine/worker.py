@@ -1,10 +1,12 @@
 from celery import Celery
+from kombu import Queue
 
 from backend.services.core_engine.config import EngineConfig
 from backend.services.core_engine.scan_task import run_scan_task
 from backend.services.core_engine.startup_checks import StartupCheck, collect_toolchain_checks
 from backend.shared.exceptions import MessageSchemaError
 from backend.shared.logging import configure_logging, get_logger
+from backend.shared.queue import Queues, dead_letter_arguments
 from backend.shared.schemas.envelope import MessageEnvelope
 from backend.shared.schemas.scan_jobs import ScanJobsPayload
 
@@ -63,12 +65,20 @@ app.conf.update(
     task_reject_on_worker_lost=True,  # NACK on worker death; message goes to DLQ
     worker_prefetch_multiplier=1,  # one task at a time per worker; scans are heavy
     broker_connection_retry_on_startup=True,
+    task_default_queue=Queues.SCAN_JOBS,
+    task_queues=(
+        Queue(
+            Queues.SCAN_JOBS,
+            durable=True,
+            queue_arguments=dead_letter_arguments(Queues.SCAN_JOBS),
+        ),
+    ),
 )
 
 
 @app.task(
     name="core_engine.scan_task",
-    queue="scan.jobs",
+    queue=Queues.SCAN_JOBS,
     bind=True,
     max_retries=0,  # Watchdog handles retry logic; do not let Celery auto-retry.
 )

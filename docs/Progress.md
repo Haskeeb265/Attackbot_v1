@@ -1,8 +1,8 @@
 # AttackBot — Project Progress
 
-> Last updated: 2026-03-20
-> Current state: **M3 implementation is in repo; M4+ remains planned. M3 verification runbook exists at `docs/M3_Verification_Runbook.md`.**
-> Test inventory (repo): **unit: 141; integrations: 28 (includes M3 verification: 4).** Skips require `INTEGRATION_TARGET`, `DATABASE_URL`, and/or `HACKERONE_API_USERNAME`/`HACKERONE_API_TOKEN`.
+> Last updated: 2026-03-24
+> Current state: **M3 complete and in repo. M4+ remains planned. Reporter worker validates `report.jobs` messages but report generation is not yet implemented.**
+> Test inventory (repo): **unit: 161 (test_engine: 65, test_scraper: 52, test_shared: 35, test_reporter_worker: 5, test_scraper_scan_publish_flow: 4); integration: 29 (test_e2e_system_trace, test_m3_verification, test_scraper_pipeline, test_engine_pipeline, test_infra_startup).** Skips require `INTEGRATION_TARGET`, `DATABASE_URL`, and/or `HACKERONE_API_USERNAME`/`HACKERONE_API_TOKEN`.
 
 ---
 
@@ -63,20 +63,20 @@
 - [x] `backend/services/attack_graph_engine/` — port 8006, `/api/v1/health` returning healthy ✅
 - [x] `backend/services/api_gateway/` — port 8000, `/api/v1/health` returning healthy ✅
 
-### Celery Workers (initial skeletons; core-engine now implemented)
-Note: `backend/services/core_engine/worker.py` is implemented; others remain boundary validators/skeletons until their milestones.
-- [x] `backend/services/core_engine/worker.py` — consumes `scan.jobs`
-- [x] `backend/services/reporter/worker.py` — consumes `report.jobs`
-- [x] `backend/services/browser_worker/worker.py` — consumes `browser.jobs`
-- [x] `backend/services/api_fuzzer_worker/worker.py` — consumes `api.fuzz.jobs`
-- [x] `backend/services/js_analysis_worker/worker.py` — consumes `js.analysis.jobs`
-- [x] `backend/services/scenario_runner/worker.py` — consumes `scenario.jobs`
-- [x] `backend/services/exploit_verifier/worker.py` — consumes `verify.jobs`
-- [x] `backend/services/ai_analysis_worker/worker.py` — consumes `ai.analysis.jobs`
+### Celery Workers (initial skeletons; core-engine and reporter now implemented)
+Note: `backend/services/core_engine/worker.py` is fully implemented. `backend/services/reporter/worker.py` validates and logs `report.jobs` messages but does not yet generate reports. Others remain boundary validators/skeletons until their milestones.
+- [x] `backend/services/core_engine/worker.py` — consumes `scan.jobs` ✅ fully implemented
+- [x] `backend/services/reporter/worker.py` — consumes `report.jobs` (validates + logs, generation stub)
+- [x] `backend/services/browser_worker/worker.py` — consumes `browser.jobs` (skeleton)
+- [x] `backend/services/api_fuzzer_worker/worker.py` — consumes `api.fuzz.jobs` (skeleton)
+- [x] `backend/services/js_analysis_worker/worker.py` — consumes `js.analysis.jobs` (skeleton)
+- [x] `backend/services/scenario_runner/worker.py` — consumes `scenario.jobs` (skeleton)
+- [x] `backend/services/exploit_verifier/worker.py` — consumes `verify.jobs` (skeleton)
+- [x] `backend/services/ai_analysis_worker/worker.py` — consumes `ai.analysis.jobs` (skeleton)
 
 ### Tests
-- [x] `tests/unit/test_shared.py` - 35 tests defined (exceptions, health, envelope, scan_jobs, report_jobs)
-- [x] `tests/integrations/test_infra_startup.py` - 4 tests defined (DB health, query execution, programs table, scans table)
+- [x] `tests/unit/test_shared.py` — 35 tests (exceptions, health, envelope, scan_jobs, report_jobs)
+- [x] `tests/integrations/test_infra_startup.py` — 4 tests (DB health, query execution, programs table, scans table)
 - [x] `tests/conftest.py` — singleton reset fixture
 
 ### CI
@@ -109,8 +109,18 @@ Note: `backend/services/core_engine/worker.py` is implemented; others remain bou
 - [x] `backend/services/scraper/config.py` — scraper-specific config (HackerOne credentials, intervals)
 - [x] `backend/services/scraper/models.py`
 - [x] `backend/services/scraper/main.py` — **replaced skeleton** with full implementation (APIs + scheduler)
-- [x] `tests/unit/test_scraper.py` - 52 tests defined
+- [x] `tests/unit/test_scraper.py` — 52 tests defined
 - [x] `tests/integrations/test_scraper_pipeline.py` — scrape → DB → queue publish flow
+
+### Scraper API Routes (implemented)
+```
+POST /api/v1/scrape/trigger         — trigger immediate scrape for a platform
+POST /api/v1/scrape/publish-batch   — trigger bounded background publish batch for due programs
+GET  /api/v1/programs               — paginated program listing with filters
+GET  /api/v1/programs/{program_id}  — single program detail
+GET  /api/v1/programs/{program_id}/scope — scope entries for a program
+GET  /api/v1/health                 — health check
+```
 
 ### Definition of Done
 - [x] `POST /scrape/trigger` produces rows in `programs` and `program_scopes`
@@ -130,21 +140,59 @@ Note: `backend/services/core_engine/worker.py` is implemented; others remain bou
 
 ---
 
-## M3 - First Strike (Complete)
+## M3 — First Strike ✅
 
-**Purpose:** Core Engine unauthenticated scanning pipeline — Stages 0 through 6.
-**Target outcome:** Scan job consumed, pipeline executed, findings in database.
-**Current state:** Completed on 2026-03-18. Verification suite is documented in `docs/M3_Verification_Runbook.md`.
+**Purpose:** Core Engine unauthenticated scanning pipeline — Stages 0 through 6 + Stage 10 (aggregation).
+**Target outcome:** Scan job consumed, pipeline executed, findings deduplicated and persisted in database, report.jobs published.
+**Completed:** 2026-03-18. Verification suite documented in `docs/M3_Verification_Runbook.md`.
 **Note:** Integration suite requires Docker Postgres bound to host `5432` (local Postgres must be stopped to avoid conflicts).
 
-### Implemented
-- [x] `backend/migrations/versions/003_engine.py` - engine schema incl. findings, finding_evidence, vulnerability_groups, assets, endpoints, js_assets, scan_stages
-- [x] Core pipeline stages 0–6 + temp Stage 7 (`backend/services/core_engine/pipeline/*`)
-- [x] Orchestration (`backend/services/core_engine/scan_task.py`, `worker.py`, `main.py`)
-- [x] Utilities (`subprocess_utils.py`, `dedup.py`, `cvss.py`, `repository.py`, `models.py`)
-- [x] Tests added (`tests/unit/test_engine.py`, `tests/integrations/test_engine_pipeline.py`, `tests/integrations/test_m3_verification.py`)
+### Pipeline Files (`backend/services/core_engine/pipeline/`)
+- [x] `context.py` — `ScanContext`, `ScopeDefinition`, `FeatureFlags` dataclasses
+- [x] `scope_filter.py` — Stage 0: `ScopeFilter` class with domain, wildcard, CIDR, URL matching
+- [x] `asset_discovery.py` — Stage 1: subfinder → alterx → dnsx → httpx chain
+- [x] `fingerprinting.py` — Stage 2: httpx tech-detect + WAF detection
+- [x] `enumeration.py` — Stage 3: ffuf + waybackurls + JS download to MinIO
+- [x] `nuclei_scan.py` — Stage 4: nuclei scanning with template exclusion and exit-code handling
+- [x] `web_vuln_tests.py` — Stage 5: XSS, CORS, CRLF scanning + passive sensitive path detection
+- [x] `js_secrets.py` — Stage 6: regex-based secret detection in downloaded JS files (12 patterns)
+- [x] `aggregator.py` — Stage 10: deduplication, persistence, vulnerability grouping, report.jobs publish
+- [x] `waf_utils.py` — WAF technology detection helper
 
-### Verification To-Do
+### Orchestration & Support
+- [x] `scan_task.py` — `run_scan_task()` → `_async_scan_pipeline()` → `_execute_pipeline()` with scope fetch from Scraper API
+- [x] `worker.py` — Celery task entry, envelope validation, `scan.jobs` consumer
+- [x] `main.py` — **replaced skeleton** with full FastAPI app: scan APIs, watchdog scheduler, health
+- [x] `repository.py` — `ScanRepository`: create/resume scan, save assets/endpoints/js_assets/findings, mark complete, record stages
+- [x] `models.py` — `DiscoveredAsset`, `DiscoveredEndpoint`, `DiscoveredJsAsset`, `FindingCandidate`, `ScanResult`
+- [x] `dedup.py` — `compute_dedup_hash()`: SHA-256 of vulnerability_type | url | parameter | payload
+- [x] `cvss.py` — `severity_to_cvss()`, `nuclei_severity()` mapping functions
+- [x] `subprocess_utils.py` — `run_tool_communicate()`, `parse_jsonl()` for external tool execution
+- [x] `watchdog.py` — APScheduler job detecting stuck scans (running > 2h)
+- [x] `startup_checks.py` — `StartupCheck` dataclass, `collect_toolchain_checks()` for nuclei binary validation
+- [x] `config.py` — `EngineConfig(BaseServiceConfig)` with nuclei, httpx, ffuf tuning knobs
+- [x] `Dockerfile` — core-engine/core-worker image with subfinder, alterx, dnsx, httpx, ffuf, nuclei, waybackurls
+- [x] `backend/migrations/versions/003_engine.py` — engine schema (assets, endpoints, js_assets, findings, finding_evidence, vulnerability_groups, scan_stages)
+
+### Core Engine API Routes (implemented)
+```
+POST /api/v1/scans/start             — start a scan for a program (fetches program from Scraper)
+GET  /api/v1/scans                   — list all scans with status
+GET  /api/v1/scans/{scan_id}         — single scan detail with stage breakdown
+GET  /api/v1/scans/{scan_id}/findings — findings for a scan (filterable by verified)
+GET  /api/v1/queue/dlq/inspect       — inspect dead letter queue messages
+GET  /api/v1/health                  — health check (DB, RabbitMQ, Redis, Scraper, toolchain)
+```
+
+### Tests
+- [x] `tests/unit/test_engine.py` — 65 tests (scope filter, asset discovery, fingerprinting, enumeration, nuclei, web_vuln_tests, js_secrets, aggregator, dedup, cvss, models, scan_task, pipeline execution)
+- [x] `tests/unit/test_reporter_worker.py` — 5 tests (reporter worker message handling)
+- [x] `tests/unit/test_scraper_scan_publish_flow.py` — 4 tests (scraper-to-scan publish flow)
+- [x] `tests/integrations/test_engine_pipeline.py` — engine pipeline integration
+- [x] `tests/integrations/test_m3_verification.py` — M3 verification suite
+- [x] `tests/integrations/test_e2e_system_trace.py` — end-to-end system trace (scraper → engine → reporter)
+
+### Verification Completed
 - [x] Re-run unit tests (`python -m pytest tests\unit -v`)
 - [x] Re-run integration tests (scraper suite) with Docker infra up (`python -m pytest tests\integrations -v`)
 - [x] Bind Docker Postgres to host `5432` for integration tests (`infra/docker-compose.yml`)
@@ -169,7 +217,7 @@ Note: `backend/services/core_engine/worker.py` is implemented; others remain bou
 - [ ] `backend/services/reporter/report_task.py` — Celery task, fetch → assemble → generate → upload
 - [ ] `backend/services/reporter/watchdog.py` — APScheduler stale report recovery
 - [ ] `backend/services/reporter/main.py` — **replace skeleton** with report APIs
-- [ ] `backend/services/reporter/worker.py` — **replace skeleton** with real report_task
+- [ ] `backend/services/reporter/worker.py` — **replace message-logging stub** with real report_task
 - [ ] `tests/unit/test_reporter.py`
 - [ ] `tests/integrations/test_report_pipeline.py` — `report.jobs` → MinIO file → download API
 
@@ -282,11 +330,11 @@ Note: `backend/services/core_engine/worker.py` is implemented; others remain bou
 Defined services: `postgres`, `redis`, `rabbitmq`, `neo4j`, `minio`, `vault`, `migrate`, `minio-init`, `vault-init`, `scraper`, `core-engine`, `reporter`, `attack-graph-engine`, `core-worker`, `reporter-worker`, `browser-worker`, `api-fuzzer-worker`, `js-analysis-worker`, `scenario-runner`, `exploit-verifier`, `ai-analysis-worker`, `api-gateway`, `prometheus`, `grafana`, `loki`, `tempo`.
 
 ### Database Migrations in Repo
-| Revision | Contents |
-|----------|----------|
-| 001_initial_schema | `programs`, `scans` (proof of life) |
-| 002_scraper_full | `programs`, `program_scopes`, `program_policies` |
-| 003_engine | scan pipeline schema incl. `assets`, `endpoints`, `js_assets`, `findings`, `finding_evidence`, `vulnerability_groups` |
+| Revision | File | Contents |
+|----------|------|----------|
+| 001_initial_schema | `001_initial_schema.py` (2966 bytes) | `programs`, `scans` (proof of life) |
+| 002_scraper_full | `002_scraper_full.py` (5418 bytes) | `programs`, `program_scopes`, `program_policies` |
+| 003_engine | `003_engine.py` (9646 bytes) | scan pipeline schema incl. `assets`, `endpoints`, `js_assets`, `findings`, `finding_evidence`, `vulnerability_groups`, `scan_stages` |
 
 ### MinIO Buckets (from `minio-init` entrypoint)
 | Bucket | Source |
@@ -296,15 +344,34 @@ Defined services: `postgres`, `redis`, `rabbitmq`, `neo4j`, `minio`, `vault`, `m
 | js-assets | `mc mb --ignore-existing` |
 | summaries | `mc mb --ignore-existing` |
 
+### Backend File Inventory by Service
+
+| Service | Files | Implementation Status |
+|---------|-------|-----------------------|
+| `shared/` | 9 modules + `schemas/` (3 schema files) | ✅ Complete (M1) |
+| `scraper/` | 10 files + `collectors/` (3 files) | ✅ Complete (M2) |
+| `core_engine/` | 13 files + `pipeline/` (11 files) + Dockerfile | ✅ Complete (M3) |
+| `reporter/` | main.py + worker.py + Dockerfile | ⚠️ Skeleton (worker validates messages, generation stub) |
+| `attack_graph_engine/` | 3 files (skeleton) | 🔲 Skeleton (M1) |
+| `browser_worker/` | 3 files (skeleton) | 🔲 Skeleton (M1) |
+| `api_fuzzer_worker/` | 3 files (skeleton) | 🔲 Skeleton (M1) |
+| `js_analysis_worker/` | 3 files (skeleton) | 🔲 Skeleton (M1) |
+| `scenario_runner/` | 3 files (skeleton) | 🔲 Skeleton (M1) |
+| `exploit_verifier/` | 3 files (skeleton) | 🔲 Skeleton (M1) |
+| `ai_analysis_worker/` | 3 files (skeleton) | 🔲 Skeleton (M1) |
+| `api_gateway/` | 3 files (skeleton) | 🔲 Skeleton (M1) |
+
 ---
 
 ## Known Issues / Technical Debt
 
 See `docs/Issues.md` for the current, prioritized gap list.
 
-| # | Issue | Severity | Milestone to fix |
-|---|-------|----------|-----------------|
-| 1 | `api-gateway` is a skeleton — no routing, no auth, no rate limiting | Low | M10 |
-| 2 | Most Celery workers are boundary validators/skeletons; core-engine worker is implemented | Low | M3-M10 per worker |
-| 3 | `vault-init` one-shot populates placeholder secrets only | Low | M10 |
-| 4 | Tempo runs with default config; no custom tracing or alerting rules | Low | M10 |
+| # | Issue | Severity | Status | Milestone to fix |
+|---|-------|----------|--------|-----------------|
+| 1 | `api-gateway` is a skeleton — no routing, no auth, no rate limiting | Low | Open | M10 |
+| 2 | Most Celery workers are boundary validators/skeletons; core-engine worker is the only fully implemented one | Low | Open | M4-M10 per worker |
+| 3 | `vault-init` one-shot populates placeholder secrets only | Low | Open | M10 |
+| 4 | Tempo runs with default config; no custom tracing or alerting rules | Low | Open | M10 |
+| 5 | Reporter worker validates `report.jobs` messages but emits `report_generation_not_yet_implemented` | Medium | Open | M4 |
+| 6 | Scraper `/api/v1/scrape/trigger` repeatedly times out during E2E runs (ISS-009) | Medium | Open | M4 |

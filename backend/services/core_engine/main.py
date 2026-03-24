@@ -160,7 +160,7 @@ def _enqueue_scan(payload: ScanJobsPayload) -> None:
         effective_payload,
         source_service=config.service_name,
     )
-    scan_task.apply_async(args=[message], queue="scan.jobs")
+    scan_task.apply_async(args=[message], queue=Queues.SCAN_JOBS)
 
 
 @asynccontextmanager

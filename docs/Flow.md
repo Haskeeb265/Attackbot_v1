@@ -1,6 +1,8 @@
-# AttackBot — Business Flow Document
-> Version: 1.0 | Last updated: 2026-03-10
-> Purpose: End-to-end description of how every piece of data, every trigger, and every decision flows through the system — from the moment a bug bounty program is discovered to the moment a report is ready for manual submission.
+# AttackBot — Comprehensive System Flow
+
+> Version: 2.0 | Last updated: 2026-03-24
+> Purpose: Low-level, implementation-grounded walkthrough of how every piece of data, every trigger, every function call, and every decision flows through the AttackBot system — from bug bounty program discovery to report generation.
+> Scope: This document maps directly to the code in `backend/`. Every function, file, and queue referenced here exists in the current codebase. Planned-only features are explicitly marked.
 
 ---
 
@@ -8,36 +10,61 @@
 1. [System Entry Points](#1-system-entry-points)
 2. [Phase 1 — Program Ingestion (Scraper)](#2-phase-1--program-ingestion-scraper)
 3. [Phase 2 — Scan Orchestration (Core Engine)](#3-phase-2--scan-orchestration-core-engine)
-4. [Phase 3 — Pipeline Stages 0–6 (Unauthenticated)](#4-phase-3--pipeline-stages-06-unauthenticated)
-5. [Phase 4 — Browser Session Bootstrap (Stage 3.5)](#5-phase-4--browser-session-bootstrap-stage-35)
-6. [Phase 5 — API Fuzzing + JS Analysis (Stages 4.5 + 6)](#6-phase-5--api-fuzzing--js-analysis-stages-45--6)
-7. [Phase 6 — Behavioral Scenarios (Stage 7)](#7-phase-6--behavioral-scenarios-stage-7)
-8. [Phase 7 — Exploit Verification (Stage 8)](#8-phase-7--exploit-verification-stage-8)
-9. [Phase 8 — AI Hypothesis (Stage 9)](#9-phase-8--ai-hypothesis-stage-9)
-10. [Phase 9 — Aggregation + Graph (Stage 10)](#10-phase-9--aggregation--graph-stage-10)
+4. [Phase 3 — Pipeline Execution (Stages 0–6, 10)](#4-phase-3--pipeline-execution-stages-06-10)
+5. [Phase 4 — Browser Session Bootstrap (Stage 3.5)](#5-phase-4--browser-session-bootstrap-stage-35) *(planned: M5)*
+6. [Phase 5 — API Fuzzing + JS Analysis (Stages 4.5 + 6)](#6-phase-5--api-fuzzing--js-analysis-stages-45--6) *(planned: M6)*
+7. [Phase 6 — Behavioral Scenarios (Stage 7)](#7-phase-6--behavioral-scenarios-stage-7) *(planned: M9)*
+8. [Phase 7 — Exploit Verification (Stage 8)](#8-phase-7--exploit-verification-stage-8) *(planned: M7)*
+9. [Phase 8 — AI Hypothesis (Stage 9)](#9-phase-8--ai-hypothesis-stage-9) *(planned: M10)*
+10. [Phase 9 — Aggregation (Stage 10)](#10-phase-9--aggregation-stage-10)
 11. [Phase 10 — Report Generation (Reporter)](#11-phase-10--report-generation-reporter)
 12. [Phase 11 — Manual Submission](#12-phase-11--manual-submission)
 13. [Failure Flows](#13-failure-flows)
 14. [Data Lifecycle Summary](#14-data-lifecycle-summary)
 15. [Decision Points and Guards](#15-decision-points-and-guards)
+16. [Code-to-Flow Reference Map](#16-code-to-flow-reference-map)
 
 ---
 
 ## 1. System Entry Points
 
-There are two ways a scan begins. Both converge on the same queue.
+There are two ways a scan begins. Both converge on the same queue (`scan.jobs`).
 
 ### Entry Point A — Scheduled Scrape (Automatic)
-1. APScheduler in the Scraper fires a per-platform job on a configured interval (e.g., every 6 hours for HackerOne).
-2. The Scraper fetches the program list from the platform API.
-3. Each program is normalized and upserted into the `programs` table.
-4. If the program is new or has scope changes, a `scan.jobs` message is published.
-5. The Core Worker picks up the message and begins the scan.
+
+**File:** `backend/services/scraper/main.py` → `lifespan()` → APScheduler
+
+1. On startup, the Scraper's `lifespan()` function registers two APScheduler jobs:
+   - `_run_platform_scrape("hackerone")` — runs on a configurable interval (e.g., every 6h)
+   - `_publish_due_scan_jobs()` — runs on a configurable interval, publishes scan messages for programs due for rescan
+2. When the scrape job fires, `_run_platform_scrape(platform)` acquires a Redis lock (`scraper:lock:{platform}`) to prevent concurrent scrapes of the same platform.
+3. The platform collector (e.g., `HackerOneCollector`) fetches programs from the platform API.
+4. Each program is normalized and upserted into `programs`, `program_scopes`, and `program_policies`.
+5. Separately, the `_publish_due_scan_jobs()` scheduler finds programs that need scanning and publishes `scan.jobs` messages.
+6. The Core Worker picks up the message and begins the scan.
 
 ### Entry Point B — Manual Trigger (On-Demand)
-1. A `POST /api/v1/scrape/trigger` request is sent to the Scraper service (via the API Gateway at `:8000`).
-2. The Scraper runs the collection pipeline immediately, outside the scheduler.
-3. Everything from step 3 onward is identical to Entry Point A.
+
+1. A `POST /api/v1/scrape/trigger?platform=hackerone` request arrives at the Scraper service.
+   - **File:** `backend/services/scraper/main.py` → `trigger_scrape()`
+   - Calls `_run_platform_scrape(platform)` directly, outside the scheduler.
+2. A `POST /api/v1/scrape/publish-batch?batch_size=N` request triggers immediate scan job publishing.
+   - **File:** `backend/services/scraper/main.py` → `trigger_scan_publish_batch()`
+   - Calls `_publish_due_scan_jobs(batch_size)` immediately.
+3. Alternatively, a scan can be started directly via the Core Engine:
+   - `POST /api/v1/scans/start` with `{"program_id": "uuid"}` on the Core Engine (:8002).
+   - **File:** `backend/services/core_engine/main.py` → `start_scan()`
+   - This fetches the program and scope from the Scraper API, builds a `ScanJobsPayload`, and enqueues it to `scan.jobs`.
+
+### Entry Point C — Core Engine Direct Dispatch
+
+**File:** `backend/services/core_engine/main.py` → `start_scan()` → `_build_payload_from_scraper()` → `_enqueue_scan()`
+
+1. `_build_payload_from_scraper()` calls the Scraper's `GET /api/v1/programs/{program_id}` and `GET /api/v1/programs/{program_id}/scope` APIs.
+2. The scope entries are parsed into `ScopeDefinition` format.
+3. A `ScanJobsPayload` is constructed with program metadata, scope, feature flags, and priority.
+4. `_enqueue_scan()` wraps the payload in a `MessageEnvelope` via `build_scan_job_message()` and calls `QueuePublisher.publish("scan.jobs", message)`.
+5. On success, returns the scan ID. On publish failure, raises `HTTPException(503)`.
 
 ### What never triggers a scan
 - A program already in-progress (`scan:lock:{program_id}` Redis lock held).
@@ -53,57 +80,96 @@ There are two ways a scan begins. Both converge on the same queue.
 **Inputs:** Platform API (HackerOne, BugCrowd, Intigriti, YesWeHack)
 **Outputs:** Rows in `programs`, `program_scopes`, `program_policies`; message on `scan.jobs`
 
+### Internal Module Map
+
+| Module | File | Responsibility |
+|--------|------|----------------|
+| Config | `config.py` | `ScraperConfig(BaseServiceConfig)` — HackerOne credentials, intervals |
+| Collectors | `collectors/base.py` | `BaseCollector` ABC + `CollectorRegistry` |
+| HackerOne | `collectors/hackerone.py` | `HackerOneCollector` — API v1, 429 retry, structured_scopes |
+| Scope | `scope_parser.py` | `ScopeParser` — typed `ProgramScope` objects |
+| Repository | `repository.py` | `ProgramRepository` — upsert, scope/policy persistence |
+| Publisher | `publisher.py` | `ScraperPublisher` — `QueuePublisher` wrapper with flag management |
+| Reconciler | `reconciler.py` | APScheduler job — republishes failed-to-queue programs |
+| Models | `models.py` | Pydantic models for programs |
+| Main | `main.py` | FastAPI app, scheduler, all API routes |
+
 ### Step-by-step
 
 **2.1 — Platform authentication**
-The Scraper loads platform credentials from Vault (`secret/platforms/hackerone/api_token`). For HackerOne: HTTP Basic Auth using API username + token. Credentials are never stored in config files.
+- **File:** `collectors/hackerone.py` → `HackerOneCollector.__init__()`
+- The collector loads platform credentials from environment config (`ScraperConfig`).
+- For HackerOne: HTTP Basic Auth using API username + token.
+- These come from environment variables `HACKERONE_API_USERNAME` and `HACKERONE_API_TOKEN`.
 
 **2.2 — Paginated program listing**
-The HackerOne collector calls `GET /v1/hackers/programs` with pagination (`page[number]`, `page[size]=100`). It iterates until the API returns an empty `data` array. Each page is processed immediately — the full list is never held in memory at once.
+- **File:** `collectors/hackerone.py` → `HackerOneCollector.collect()`
+- The collector calls `GET /v1/hackers/programs` with pagination (`page[number]`, `page[size]=100`).
+- It iterates until the API returns an empty `data` array.
+- Each page is processed immediately — the full list is never held in memory at once.
 
 **2.3 — 429 handling**
-On every API request: if `HTTP 429` is returned, the collector reads the `Retry-After` header and sleeps for that duration, then retries. After `max_retries=3` consecutive 429s, `CollectorRateLimitError` is raised and the scrape job is marked failed for that platform. The scheduler will retry on the next cycle.
+- **File:** `collectors/hackerone.py`
+- On every API request: if `HTTP 429` is returned, the collector reads the `Retry-After` header and sleeps for that duration, then retries.
+- After `max_retries=3` consecutive 429s, `CollectorRateLimitError` is raised and the scrape job is marked failed for that platform.
+- The scheduler will retry on the next cycle.
 
 **2.4 — Per-program detail fetch**
-For each program in the listing, the collector calls `GET /v1/hackers/programs/{handle}` for full details and `GET /v1/hackers/programs/{handle}/structured_scopes` for parsed scope entries. Raw markdown scope parsing is never used — structured scopes are always preferred.
+- **File:** `collectors/hackerone.py`
+- For each program in the listing, the collector calls:
+  - `GET /v1/hackers/programs/{handle}` for full details
+  - `GET /v1/hackers/programs/{handle}/structured_scopes` for parsed scope entries
+- Raw markdown scope parsing is never used — structured scopes are always preferred.
 
 **2.5 — Normalization**
-The raw platform response is passed through the platform-specific normalizer, which maps it to the canonical `Program` dataclass:
-- `platform` (hackerone, bugcrowd, etc.)
-- `handle` (unique identifier on the platform)
-- `bounty_type` (bug_bounty or vdp)
-- `max_bounty`
-- `is_active`
-- Nested: `in_scope` and `out_of_scope` scope entries with typed `asset_type` (url, domain, wildcard_domain, ip_range, mobile_app, api)
+- **File:** `collectors/hackerone.py` → normalizer logic
+- The raw platform response is mapped to the canonical program structure:
+  - `platform` (hackerone, bugcrowd, etc.)
+  - `handle` (unique identifier on the platform)
+  - `bounty_type` (bug_bounty or vdp)
+  - `max_bounty`
+  - `is_active`
+  - Nested: `in_scope` and `out_of_scope` scope entries
 
 **2.6 — Scope parsing**
-The `ScopeParser` converts raw scope entries into typed `ProgramScope` objects. It handles:
-- `*.example.com` → wildcard domain, stored as `wildcard_domain` asset type
-- `192.168.1.0/24` → CIDR range, stored as `ip_range`
-- `https://example.com/api/` → URL with path prefix
-- `com.example.app` → mobile app bundle identifier
-
-Each scope entry is stored in `program_scopes` with a `scope_type` (in_scope or out_of_scope).
+- **File:** `scope_parser.py` → `ScopeParser`
+- Converts raw scope entries into typed `ProgramScope` objects. Handles:
+  - `*.example.com` → wildcard domain, stored as `wildcard_domain` asset type
+  - `192.168.1.0/24` → CIDR range, stored as `ip_range`
+  - `https://example.com/api/` → URL with path prefix
+  - `com.example.app` → mobile app bundle identifier
+- Each scope entry is stored in `program_scopes` with a `scope_type` (in_scope or out_of_scope).
 
 **2.7 — Upsert**
-`ProgramRepository.upsert()` performs an INSERT ON CONFLICT DO UPDATE. Critical rule: if the program already exists with `queued_for_scan=True`, that flag is NOT overwritten during re-scrape. This prevents the reconciler from losing track of programs that failed to publish.
+- **File:** `repository.py` → `ProgramRepository.upsert()`
+- Performs an `INSERT ... ON CONFLICT DO UPDATE`.
+- Critical rule: if the program already exists with `queued_for_scan=True`, that flag is NOT overwritten during re-scrape.
+- This prevents the reconciler from losing track of programs that failed to publish.
 
 **2.8 — Queue publish**
-`QueuePublisher.publish()` sends a `scan.jobs` message containing:
-- `program_id`, `platform`, `handle`
-- Full `scope` (in_scope list, out_of_scope list)
-- `feature_flags` (which scanners to enable — loaded from environment defaults)
-- `priority` (1–10)
-- `scan_timeout_seconds`
-
-On publish success: `queued_for_scan` is cleared.
-On publish failure: `queued_for_scan` is set to `True` and the reconciler handles retry.
+- **File:** `main.py` → `_publish_due_scan_jobs()`
+- Queries programs due for rescan (based on last_scraped_at and configurable interval).
+- For each eligible program, calls `ScraperPublisher.publish_scan_job()`.
+- The `ScraperPublisher` uses `backend/shared/schemas/scan_jobs.py` → `build_scan_job_message()` to construct the `MessageEnvelope`, then `QueuePublisher.publish("scan.jobs", message)`.
+- **Envelope structure:**
+  - `event_type`: `"program.scraped"`
+  - `schema_version`: `"1.0"`
+  - `payload`: `ScanJobsPayload` containing `program_id`, `scope`, `feature_flags`, `priority`
+- On publish success: `queued_for_scan` is cleared.
+- On publish failure: `queued_for_scan` is set to `True` and the reconciler handles retry.
 
 **2.9 — Reconciler**
-An APScheduler job runs every 5 minutes. It queries `programs WHERE queued_for_scan = True AND last_scraped_at > NOW() - INTERVAL '7 days'`. For each: it republishes to `scan.jobs`. On success, clears the flag. On failure, leaves the flag for the next cycle. Programs older than 7 days are not auto-retried — they require a new scrape.
+- **File:** `reconciler.py`
+- An APScheduler job runs on a configurable interval (default: every 5 minutes).
+- Queries `programs WHERE queued_for_scan = True AND last_scraped_at > NOW() - INTERVAL '7 days'`.
+- For each: republishes to `scan.jobs`. On success, clears the flag. On failure, leaves it.
+- Programs older than 7 days are not auto-retried — they require a new scrape.
 
 **2.10 — Redis lock**
-A per-platform Redis lock (`scraper:lock:{platform}`) prevents two scrape jobs for the same platform from running simultaneously. Lock TTL is set to 2x the expected scrape duration. If the lock cannot be acquired, the job is skipped for that cycle.
+- **File:** `main.py` → `_run_platform_scrape()`
+- A per-platform Redis lock (`scraper:lock:{platform}`) prevents two scrape jobs for the same platform from running simultaneously.
+- Lock TTL is set to 2x the expected scrape duration.
+- If the lock cannot be acquired, the job is skipped for that cycle.
 
 ---
 
@@ -111,400 +177,561 @@ A per-platform Redis lock (`scraper:lock:{platform}`) prevents two scrape jobs f
 
 **Service:** `core-engine` (:8002) + `core-worker` (Celery)
 **Queue consumed:** `scan.jobs`
-**Queue produced:** `report.jobs`, plus sub-queues per stage
+**Queue produced:** `report.jobs`
+
+### Internal Module Map
+
+| Module | File | Responsibility |
+|--------|------|----------------|
+| Worker | `worker.py` | Celery app, `scan_task()` entry point |
+| Scan Task | `scan_task.py` | `run_scan_task()`, `_async_scan_pipeline()`, `_execute_pipeline()` |
+| Repository | `repository.py` | `ScanRepository` — DB operations for scans, assets, endpoints, findings |
+| Models | `models.py` | `DiscoveredAsset`, `DiscoveredEndpoint`, `DiscoveredJsAsset`, `FindingCandidate`, `ScanResult` |
+| Config | `config.py` | `EngineConfig` — nuclei/httpx/ffuf tuning, timeouts |
+| Dedup | `dedup.py` | `compute_dedup_hash()` — SHA-256 deduplication |
+| CVSS | `cvss.py` | `severity_to_cvss()`, `nuclei_severity()` |
+| Subprocess | `subprocess_utils.py` | `run_tool_communicate()`, `parse_jsonl()` |
+| Watchdog | `watchdog.py` | Stuck scan detection |
+| Startup | `startup_checks.py` | `collect_toolchain_checks()` — nuclei binary validation |
+| Main | `main.py` | FastAPI app, scan APIs, watchdog scheduler |
 
 ### Step-by-step
 
-**3.1 — Message receipt**
-The `core-worker` Celery process receives a message from `scan.jobs`. `task_acks_late=True` means the message is NOT acknowledged until the task function returns or explicitly acks. A worker crash will cause RabbitMQ to redeliver the message.
+**3.1 — Message receipt (worker.py)**
+- **File:** `worker.py` → `scan_task()`
+- The `core-worker` Celery process receives a message from `scan.jobs`.
+- The Celery task is configured with:
+  - `task_acks_late=True` — message is NOT acknowledged until the task function returns
+  - `task_reject_on_worker_lost=True` — NACK on worker death; message goes to DLQ
+  - `worker_prefetch_multiplier=1` — one task at a time per worker
+  - `max_retries=0` — no Celery auto-retry; watchdog handles retry logic
+- On receipt, the task:
+  1. Deserializes `raw message dict` → `MessageEnvelope`
+  2. Validates `event_type == "program.scraped"` and `schema_version == "1.x"`
+  3. Extracts `ScanJobsPayload` from `envelope.payload`
+  4. Calls `run_scan_task(payload)`
 
-**3.2 — Redis scan lock**
-Before doing any work, the worker acquires `scan:lock:{program_id}`. If the lock is already held (a previous scan of this program is still running), the task returns immediately without creating a scan record. The message is acknowledged (not requeued) — the assumption is the existing scan will produce results.
+**3.2 — Scan task entry (scan_task.py → run_scan_task)**
+- **File:** `scan_task.py` → `run_scan_task(payload)`
+- This is a **synchronous wrapper** that runs `asyncio.run(_async_scan_pipeline(payload))`.
+- If the payload is a `dict` (not yet a Pydantic model), it's validated into `ScanJobsPayload` first.
 
-**3.3 — Scan record creation**
-A row is inserted into `scans` with `status=pending`. If a scan for this program already exists with `status=failed_internal` and `retry_count < 2`, that record is reused with `retry_count` incremented. Otherwise a new record is created.
+**3.3 — Async pipeline (scan_task.py → _async_scan_pipeline)**
+- **File:** `scan_task.py` → `_async_scan_pipeline(payload)`
+- This is the core pipeline orchestrator. Steps:
 
-**3.4 — Scope loading**
-The engine calls `GET /api/v1/programs/{program_id}/scope` on the Scraper service. This returns the canonical scope from `program_scopes`. The `ScopeFilter` object is built from this data. If the scope API returns an empty in-scope list, a `ScopeFatalError` is raised immediately — the scan transitions to `failed_scope` and the task exits.
+  **a. Initialize infrastructure:**
+  - Load `EngineConfig()`
+  - Initialize DB via `init_db()`
+  - Initialize MinIO storage via `init_storage()`
 
-**3.5 — Feature flag resolution**
-Feature flags from the `scan.jobs` message override environment defaults. This allows per-program scanner profiles (e.g., enable SSRF scanning only for programs that explicitly allow it in their testing policy).
+  **b. Fetch scope from Scraper API:**
+  - Calls `_fetch_scope_from_scraper(program_id, config)`
+  - Makes `GET /api/v1/programs/{program_id}/scope` on the Scraper service
+  - If scope is empty or the API returns an error: `ScanError` is raised → scan marked `failed_scope`
 
-**3.6 — Pipeline execution**
-`run_pipeline(scan_context)` is called. It executes stages in order, with the parallelism groups described in Section 4. Each stage writes its results into `scan_context` (an in-memory object) and to the database. Stage failures are classified as fatal (abort scan) or non-fatal (record in `partial_detail`, continue).
+  **c. Build ScanContext:**
+  - `ScopeDefinition.from_shared()` converts the shared schema to the pipeline's internal dataclass
+  - `FeatureFlags.from_shared()` converts feature flags
+  - `ScanContext` bundles: `scan_id`, `program_id`, `scope`, `feature_flags`, `priority`
+  - `ScanContext` is immutable — stages must not modify it
 
-**3.7 — Watchdog**
-An APScheduler job in `core-engine` runs every 15 minutes. It queries `scans WHERE status='running' AND started_at < NOW() - INTERVAL '2 hours'`. For each stuck scan:
-- Status is updated to `failed_internal`, `error_detail='watchdog_timeout'`
-- If `retry_count < 2`, the scan is republished to `scan.jobs`
-- The Redis lock is released
+  **d. Create or resume scan record:**
+  - `ScanRepository.create_or_resume_scan()` is called within a DB session
+  - If a `running` scan already exists for this program: it is reused (prevents duplicates after crash)
+  - If a `failed_internal` scan exists with `retry_count < 2`: it is reused and `retry_count` is incremented
+  - Otherwise: a new row in `scans` with `status=pending`
 
-This ensures no scan can block a program's queue slot indefinitely.
+  **e. Acquire Redis scan lock:**
+  - Redis lock key: `scan:lock:{program_id}`
+  - If the lock is already held: task returns immediately without running
+  - The message is acknowledged (not requeued) — the existing scan will produce results
+
+  **f. Execute pipeline:**
+  - Calls `_execute_pipeline(ctx, scan_result, repo, publisher, config)`
+  - On unhandled exception: scan is marked `failed_internal`
+
+**3.4 — Watchdog (main.py + watchdog.py)**
+- **File:** `main.py` → `lifespan()` registers APScheduler job, `watchdog.py` → `check_stuck_scans()`
+- Runs every 15 minutes.
+- Queries `scans WHERE status='running' AND started_at < NOW() - INTERVAL '2 hours'`.
+- For each stuck scan:
+  - Status is updated to `failed_internal`, `error_detail='watchdog_timeout'`
+  - If `retry_count < 2`: the scan is republished to `scan.jobs` with a fresh `MessageEnvelope`
+  - The Redis lock is released
 
 ---
 
-## 4. Phase 3 — Pipeline Stages 0–6 (Unauthenticated)
+## 4. Phase 3 — Pipeline Execution (Stages 0–6, 10)
 
-All stages run inside the `core-worker` process. Sub-stages that require heavy computation are offloaded to specialist workers via queues, but stages 0–3 run locally.
+All stages run inside the `core-worker` process via `_execute_pipeline()` in `scan_task.py`.
+
+**File:** `scan_task.py` → `_execute_pipeline(ctx, scan_result, repo, publisher, config)`
+
+The pipeline runs stages in this exact order:
+
+```
+Stage 0 (scope_filter)     → builds ScopeFilter [FATAL on failure]
+Stage 1 (asset_discovery)   → discovers live assets
+Stage 2 (fingerprinting)    → enriches assets with tech stack
+Stage 3 (enumeration)       → path/directory discovery + JS download
+Stage 4 (nuclei_scan)      ┐
+                             ├── run in PARALLEL (asyncio.gather)
+Stage 5 (web_vuln_tests)   ┘
+Stage 6 (js_secrets)        → regex secret scanning on JS files
+Stage 10 (aggregator)       → dedup, persist, group, publish to report.jobs [FATAL on failure]
+```
+
+Each stage is wrapped in try/except. Non-fatal stages log errors to `scan_result.stage_errors[stage_name]` and continue. Fatal stages (`0` and `10`) cause the pipeline to abort.
 
 ### Stage 0 — Scope Filter (FATAL)
-- `ScopeFilter` is built from `program_scopes` entries.
-- Every URL, domain, and IP is tested against the filter before any tool is invoked.
-- If the scope cannot be resolved (empty in-scope, parse error), `ScopeFatalError` is raised and the scan is terminated immediately with `status=failed_scope`.
-- No scan work is ever performed on an undefined scope.
+
+**File:** `pipeline/scope_filter.py` → `ScopeFilter.__init__()`
+**Called from:** `_execute_pipeline()` — first thing
+
+- `ScopeFilter` is constructed from the `ScopeDefinition` in `ScanContext`.
+- The constructor checks: `if not scope.in_scope: raise ScanError(...)` — this is the fatal guard.
+- The `ScopeFilter` stores:
+  - `_in_scope`: list of scope rules (strings or dicts with `asset_type` + `value`)
+  - `_out_of_scope`: list of exclusion rules
+  - `_in_networks`: list of parsed `ipaddress.IPv4Network`/`IPv6Network` objects (for CIDR matching)
+  - `_out_networks`: same for exclusions
+
+**How scope matching works (`ScopeFilter.is_in_scope(target)`):**
+1. Extract the hostname from the target URL/string via `_extract_domain()`
+2. Attempt to parse it as an IP address via `_try_parse_ip()`
+3. Check out-of-scope first: if the target matches ANY out-of-scope rule → **reject** (out-of-scope always wins)
+4. Check in-scope: target must match at least one in-scope rule → **accept**
+5. Rule matching (`_matches_rule`) handles three cases:
+   - `asset_type == "wildcard_domain"` or rule starts with `*.` → subdomain-only match (e.g., `*.example.com` matches `sub.example.com` but NOT `example.com`)
+   - `asset_type == "domain"` → root domain + all subdomains
+   - Plain string → exact host match
 
 ### Stage 1 — Asset Discovery
-- `subfinder` runs passive subdomain enumeration for each in-scope domain. Uses streaming readline (large output).
-- `alterx` generates permuted subdomain variants from the subfinder output.
-- `dnsx` resolves the permuted list and filters to live hosts. **This step is mandatory** — skipping it sends thousands of non-existent hosts to httpx.
-- `httpx` probes all resolved hosts for live HTTP services, collecting status codes, titles, and technology hints.
-- Every discovered asset is tested against `ScopeFilter` before being written to `assets`.
-- Out-of-scope assets are dropped. In-scope assets are persisted with `is_in_scope=True`.
+
+**File:** `pipeline/asset_discovery.py` → `run(ctx, scope_filter, config)`
+
+**Purpose:** Discover live HTTP hosts within scope using subdomain enumeration + DNS resolution + HTTP probing.
+
+**Step-by-step:**
+
+1. **Seed extraction** — `_extract_seed_domains(in_scope, scope_filter)`:
+   - Domain and wildcard_domain scope rules are always seed candidates
+   - URL rules are seed candidates only when HTTP(S) and their hostname is covered by in-scope domain/wildcard rules
+   - Non-web scope types (mobile_app, api, ip_range) are skipped
+   - Result: a deduplicated list of seed domains
+
+2. **Per-domain discovery pipeline** — `_discover_domain(domain, scope_filter, config)`:
+   - Run each tool via `subprocess_utils.run_tool_communicate()` — this creates an `asyncio.subprocess`, captures stdout/stderr, enforces a timeout, and raises on non-zero exit codes
+
+   **a. subfinder** — passive subdomain enumeration:
+   ```
+   subfinder -d {domain} -all -silent
+   ```
+   - Reads stdout line-by-line (streaming — large output)
+   - Output: list of subdomains like `api.example.com`, `dev.example.com`
+
+   **b. alterx** — permuted subdomain generation:
+   ```
+   alterx -silent
+   ```
+   - Takes subfinder output as stdin
+   - Generates permutations: `api-dev.example.com`, `staging.api.example.com`, etc.
+   - Output: expanded subdomain list
+
+   **c. dnsx** — DNS resolution:
+   ```
+   dnsx -l {targets_file} -a -resp -silent
+   ```
+   - Resolves each permuted subdomain to check if it actually exists
+   - **This step is mandatory** — skipping it sends thousands of non-existent hosts to httpx
+
+   **d. httpx** — HTTP probing:
+   ```
+   httpx -l {targets_file} -json -silent -status-code -title -tech-detect -no-color
+   ```
+   - Probes all resolved hosts for live HTTP services
+   - Collects: status code, title, technology hints, content_type, webserver
+   - Output: JSONL with one JSON object per live asset
+
+3. **Scope filtering** — `scope_filter.filter_targets()`:
+   - Every discovered asset is tested against `ScopeFilter` before being recorded
+   - Out-of-scope assets are dropped and logged
+   - In-scope assets become `DiscoveredAsset` objects
+
+4. **Deduplication** — `_dedupe_assets_by_origin(assets)`:
+   - Canonical origin key: `{scheme}://{host}:{port}` (default ports omitted)
+   - First-seen wins for all fields; later duplicates only fill null fields
+
+5. **Persistence:**
+   - `ScanRepository.save_assets()` persists each `DiscoveredAsset` to the `assets` table
+   - Each asset gets an `asset_id` (UUID) stamped after DB insert
+   - The list of asset URLs is stored in `ctx.live_assets` for downstream stages
 
 ### Stage 2 — Fingerprinting
-- `httpx` (projectdiscovery) probes each asset for technology stack, WAF presence, and response header anomalies.
-- Results written to `assets.technology_stack` (JSONB) and `assets.waf_detected`.
-- WAF presence is noted but does not block any subsequent stages — all scanners still run.
+
+**File:** `pipeline/fingerprinting.py` → `run(ctx, assets, config)`
+
+**Purpose:** Enrich already-discovered assets with detailed technology stack and WAF information.
+
+**Step-by-step:**
+
+1. Write all asset URLs to a temp file
+2. Run **httpx** with extended fingerprinting:
+   ```
+   httpx -l {targets_file} -json -silent -tech-detect -status-code -title -no-color
+   ```
+3. Parse JSONL output into a lookup dict keyed by `_normalize_url_for_lookup()`:
+   - URL normalization: lowercase scheme + host, strip default ports (80/443), strip trailing slashes
+   - Both `input` and `url` keys from httpx output are registered (handles redirects)
+4. For each existing asset, look up the fingerprint and update:
+   - `asset.http_status` = httpx status code
+   - `asset.technology_stack` = `{"technologies": [...], "title": "...", "content_type": "...", "server": "..."}`
+   - `asset.waf_detected` = result of `waf_utils.detect_waf_technology(tech_list)` — checks for known WAF technology names in the detected tech list
+5. WAF presence is noted but does NOT block subsequent stages — all scanners still run.
 
 ### Stage 3 — Enumeration
-- `ffuf` performs directory and path discovery against each in-scope asset.
-- `waybackurls` pulls historical URL data from the Wayback Machine and Common Crawl.
-- Discovered endpoints are merged, deduplicated, and written to `endpoints`.
-- JavaScript files found during enumeration are downloaded and uploaded to MinIO (`js-assets/` bucket). Their content hash is stored in `js_assets`. If the same JS content was seen before (matching `content_hash`), the MinIO upload is skipped and the existing record is reused.
 
-**Parallelism starts here:** After Stage 3 completes:
-- Stage 3.5 (Browser Session) is triggered if `ENABLE_BROWSER_SESSION=True`
-- While waiting for Stage 3.5, Stages 4 + 4.5 begin in parallel Group A
+**File:** `pipeline/enumeration.py` → `run(ctx, assets, scope_filter, config)`
+
+**Purpose:** Directory/path discovery, historical URL fetch, and JavaScript file download.
+
+**Step-by-step:**
+
+1. For each in-scope asset, call `_enumerate_asset()`:
+
+   **a. ffuf** — directory/path discovery — `_run_ffuf(asset, base_url, config)`:
+   ```
+   ffuf -u {base_url}/FUZZ -w {wordlist} -o {output_file} -of json -mc all -fc 404 -t {threads} -timeout {timeout}
+   ```
+   - The output JSON contains discovered paths with response codes
+   - Each valid path becomes a `DiscoveredEndpoint`:
+     - `method`: "GET"
+     - `path`: the discovered path
+     - `full_url`: base_url + path
+     - `response_code`: HTTP status from ffuf
+     - `asset_id`: from the parent asset
+
+   **b. waybackurls** — historical URL discovery — `_run_waybackurls(asset, base_url, scope_filter, config)`:
+   ```
+   waybackurls {domain}
+   ```
+   - Pulls historical URL data from the Wayback Machine and Common Crawl
+   - Each discovered URL is scope-filtered (`scope_filter.is_in_scope()`)
+   - Valid URLs become `DiscoveredEndpoint` objects
+
+2. **Endpoint deduplication** — `_dedupe_endpoints()`:
+   - Key: `(method, host, path)` — duplicates are collapsed
+
+3. **JavaScript file download** — `_download_and_store_js(ctx, js_url, scope_filter, config)`:
+   - During enumeration, `.js` URLs are identified
+   - Each JS file is downloaded via `httpx` (the Python HTTP client, not the CLI tool)
+   - Content hash (SHA-256) is computed
+   - If a JS asset with the same hash already exists in `js_assets` → skip (deduplication by content)
+   - Otherwise: upload to MinIO bucket `js-assets/` via `upload_bytes()`
+   - Create `DiscoveredJsAsset` with: `scan_id`, `url`, `storage_path`, `content_hash`, `size_bytes`
+   - `ScanRepository.save_js_asset()` persists to `js_assets` table (INSERT ON CONFLICT on content_hash is a no-op)
+   - JS asset IDs are stored in `ctx.js_asset_ids` for Stage 6
+
+4. **Persistence:**
+   - All endpoints are persisted via `ScanRepository.save_endpoints()`
+
+### Stages 4 + 5 — Parallel Execution
+
+**File:** `scan_task.py` → `_execute_pipeline()` — uses `asyncio.gather()`
+
+```python
+results = await asyncio.gather(
+    nuclei_scan.run(ctx, assets, scope_filter, config),
+    web_vuln_tests.run(ctx, endpoints, scope_filter, feature_flags),
+    return_exceptions=True,
+)
+```
+
+Both stages produce `list[FindingCandidate]` which are collected in `scan_result.finding_candidates`.
 
 ### Stage 4 — Nuclei Scanning
-- Target list built from all in-scope assets + endpoints. Each target is validated through `ScopeFilter` again.
-- `nuclei` runs with the full community template set against the target list. `-silent` flag prevents status lines from mixing with JSON output.
-- Output is parsed: only lines starting with `{` are treated as JSON findings. `returncode==1` is not an error — it means zero findings.
-- Each nuclei result is converted to a candidate `Finding` with CVSS scoring. `is_verified=False`.
-- `deduplication_hash` is computed and checked before persistence. Duplicates are dropped.
+
+**File:** `pipeline/nuclei_scan.py` → `run(ctx, assets, scope_filter, config)`
+
+**Purpose:** Run nuclei template-based vulnerability scanning against all live assets.
+
+**Step-by-step:**
+
+1. **Target list construction:**
+   - Extract asset URLs: `[asset.value for asset in assets]`
+   - Filter through `scope_filter.filter_targets()` — second scope check
+   - Write targets to a temp file
+
+2. **Nuclei execution:**
+   ```
+   nuclei -l {targets_file} -json -silent -rate-limit {config.nuclei_rate_limit}
+          -bulk-size {config.nuclei_bulk_size} -concurrency {config.nuclei_concurrency}
+          -exclude-tags headless
+   ```
+   - `-exclude-tags headless` — exclude browser-based templates (M5 handles those)
+   - `-json -silent` — prevents status lines from mixing with JSON output
+   - Timeout: `config.nuclei_timeout` (default 3600s), scaled by `config.scaled_timeout()` if available
+
+3. **Exit code handling:**
+   - `returncode==0`: normal completion (with or without findings)
+   - `returncode==1`: zero findings (NOT an error)
+   - `returncode==2`: startup failure — classified by `_classify_exit_code_2_reason()`:
+     - `templates_configured_verify_path_or_contents`
+     - `templates_missing_or_unreadable`
+     - `target_resolution_or_parsing`
+     - `empty_target_list`
+     - `nuclei_startup_initialization_failure`
+
+4. **Finding conversion:**
+   - Parse stdout via `parse_jsonl()` — only lines starting with `{` are treated as JSON
+   - For each nuclei result:
+     - Extract `matched-at` URL and verify it's in scope
+     - Map severity via `nuclei_severity()` (maps nuclei's severity strings to canonical values)
+     - Create `FindingCandidate`:
+       ```python
+       FindingCandidate(
+           vulnerability_type=f"nuclei_{template_id}",
+           title=entry["info"]["name"],
+           severity=severity,
+           affected_url=matched_url,
+           source="nuclei",
+           cvss_score=severity_to_cvss(severity),
+           raw_output=entry,  # full nuclei JSON preserved
+       )
+       ```
+   - All candidates have `is_verified=False` (set during Stage 10 persistence)
 
 ### Stage 5 — Web Vulnerability Tests
-Runs in parallel with Stage 4 (Group A).
-- **XSS scanner:** Injects reflection payloads into discovered parameters. Checks for unescaped output in response body.
-- **CORS scanner:** Sends crafted `Origin` headers. Flags misconfigured CORS if `Access-Control-Allow-Origin` reflects the attacker origin with `Access-Control-Allow-Credentials: true`.
-- **CRLF scanner:** Disabled by default (feature flag). Injects CRLF sequences into headers.
-- **SQLi scanner:** Disabled by default. Error-based detection only at this stage (time-based runs in Stage 8 verification).
-- **SSRF scanner:** Disabled by default. OOB detection via Interactsh at Stage 8.
-All candidates written as `is_verified=False` findings.
+
+**File:** `pipeline/web_vuln_tests.py` → `run(ctx, endpoints, scope_filter, feature_flags)`
+
+**Purpose:** Active web vulnerability scanning against discovered endpoints.
+
+**Step-by-step:**
+
+1. Filter endpoints to in-scope only
+2. For each endpoint, run `_test_endpoint()` via `asyncio.gather()` (parallelized):
+
+   **a. Passive sensitive path detection** — `_passive_sensitive_path_findings(ep)`:
+   - No HTTP requests needed — checks enumerated endpoint paths
+   - Checks against `SENSITIVE_PATHS` dict:
+     - `/.env` → "Exposed environment file" (critical)
+     - `/.git/HEAD` → "Exposed Git metadata" (critical)
+     - `/.git/config` → "Exposed Git config" (critical)
+   - Only triggers if `ep.response_code` is one of: 200, 204, 301, 302, 307, 401, 403
+
+   **b. XSS scanning** — `_test_xss(ep, client)`:
+   - Three probe payloads:
+     - `<script>alert(1)</script>`
+     - `"><img src=x onerror=alert(1)>`
+     - `';alert(1)//`
+   - For each parameter (capped at 10 per endpoint):
+     - Inject payload as parameter value
+     - `GET {ep.full_url}?{param}={payload}`
+     - If payload appears verbatim in response body → candidate finding
+     - Break after first finding per parameter
+   - `vulnerability_type="reflected_xss"`, `severity="high"`
+
+   **c. CORS scanning** — `_test_cors(ep, client)`:
+   - Three test origins:
+     - `https://evil.com`
+     - `null`
+     - `https://attacker.example.com`
+   - For each origin:
+     - `GET {ep.full_url}` with `Origin: {origin}` header
+     - Check: `Access-Control-Allow-Origin` reflects origin OR is `*`
+     - AND: `Access-Control-Allow-Credentials: true`
+     - Both conditions → candidate finding
+   - `vulnerability_type="cors_misconfiguration"`, `severity="high"`
+
+   **d. CRLF scanning** — `_test_crlf(ep, client)` *(gated by `feature_flags.crlf`)*:
+   - Payload: `%0d%0aSet-Cookie:crlf=injected`
+   - Appended to full URL
+   - If `crlf=injected` appears in response headers → candidate finding
+   - `vulnerability_type="crlf_injection"`, `severity="medium"`
+
+   **e. SQLi, SSRF** — not yet implemented (placeholder comments; gated by feature flags, will be implemented in M6+)
+
+3. All candidates are collected and returned. HTTP client is configured with:
+   - `timeout=10.0`
+   - `follow_redirects=False`
+   - `verify=False` (TLS cert validation off — scanning targets may have invalid certs)
 
 ### Stage 6 — JS Secret Scanning
-Runs after Stage 3 (needs JS files) and in parallel with Stage 5 (Group B).
-- Reads each JS asset from MinIO by `js_asset_id`.
-- Applies regex patterns for: AWS access keys, GCP service account keys, Stripe API keys, Twilio tokens, JWT secrets, PEM private keys, bearer tokens, generic high-entropy strings.
-- Each match produces a candidate `Finding` with `vulnerability_type=secret_exposure`.
-- Full JS analysis (Semgrep + AST) is offloaded to the `js-analysis-worker` in M6. In M3, only regex runs here.
+
+**File:** `pipeline/js_secrets.py` → `run(ctx, js_assets)`
+
+**Purpose:** Regex-based secret detection in JavaScript files downloaded during Stage 3.
+
+**Step-by-step:**
+
+1. For each `DiscoveredJsAsset` in the list:
+   - Download JS content from MinIO: `download_bytes(bucket="js-assets", object_name=...)`
+   - Decode bytes to string (with error replacement)
+   - Run `_scan_content(content, source_url)`
+
+2. **Pattern matching** — `_scan_content()`:
+   - 12 compiled regex patterns (compiled once at module load):
+
+     | Pattern | Label | Severity |
+     |---------|-------|----------|
+     | `AIza[0-9A-Za-z\-_]{35}` | Google API Key | high |
+     | `AAAA[A-Za-z0-9_\-]{7}:[A-Za-z0-9_\-]{140}` | Firebase Server Key | high |
+     | `sk-[a-zA-Z0-9]{48}` | OpenAI API Key | critical |
+     | `xox[baprs]-[0-9]{12}-[0-9]{12}-[0-9a-fA-F]{24}` | Slack Token | high |
+     | Generic API key assignment pattern | Generic API Key Assignment | medium |
+     | Hardcoded password assignment | Hardcoded Password | high |
+     | Secret/private key assignment | Hardcoded Secret Key | high |
+     | JWT token pattern (`eyJ...`) | JWT Token | medium |
+     | PEM private key header | Private Key | critical |
+     | `ghp_[A-Za-z0-9]{36}` | GitHub Personal Access Token | critical |
+     | AWS Access Key ID (`AKIA...`) | AWS Access Key ID | critical |
+     | AWS Secret Access Key | AWS Secret Access Key | critical |
+
+   - For each pattern that matches:
+     - Take first match only (don't emit one finding per occurrence)
+     - Create `FindingCandidate`:
+       ```python
+       FindingCandidate(
+           vulnerability_type="js_secret",
+           title=f"{label} found in JavaScript",
+           severity=severity,
+           affected_url=js_url,
+           source="js_secrets",
+           payload=match_preview[:80],
+       )
+       ```
+
+3. Failures to download or parse individual JS files are logged as warnings but don't crash the stage.
 
 ---
 
-## 5. Phase 4 — Browser Session Bootstrap (Stage 3.5)
+## 5. Phase 4 — Browser Session Bootstrap (Stage 3.5) *(planned: M5 — not yet implemented)*
 
 **Worker:** `browser-worker` (Celery)
 **Queue:** `browser.jobs`
 **Triggered:** After Stage 3 completes, if `ENABLE_BROWSER_SESSION=True`
 
-### Step-by-step
+> The `browser_worker/worker.py` currently exists as a skeleton with queue consumption setup. Stage 3.5 logic will be implemented in M5.
 
-**5.1 — Job dispatch**
-Core Engine publishes a `session.request` message to `browser.jobs` containing the `program_id`, the login scenario to use, and whether IDOR verification is enabled (which requires two sessions).
+### Designed behavior (from Architecture):
 
-**5.2 — Browser context creation**
-The `browser-worker` launches a fresh Playwright Chromium browser context per job. `service_workers='block'` is set on every context — without this, Service Workers intercept requests before Playwright's route handler sees them.
-
-**5.3 — Scope enforcement**
-`browser_context.route("**/*", enforce_scope)` is registered before any navigation. The route handler checks every request URL against the program's in-scope domain list. Out-of-scope requests are hard-blocked (`.abort()`). Internal scheme requests (`data:`, `blob:`, `chrome-extension:`) are always allowed.
-
-**5.4 — Scenario execution**
-The YAML login scenario is loaded and executed step by step:
-- `visit` → `page.goto(url)`
-- `fill` → `page.fill(selector, value)`
-- `submit` → `page.click(submit_selector)`
-- `wait` → `asyncio.sleep(seconds)`
-- `handle_totp` → reads `$TOTP_SECRET` variable from Vault, generates current TOTP code with pyotp, fills the MFA field
-- `capture_cookies` → `context.storage_state()` is called
-
-**5.5 — TOTP secret resolution**
-If a scenario step references `$TOTP_SECRET`, the browser worker calls Vault: `secret/programs/{program_id}/totp_secret`. The secret is never stored in the YAML file. If the Vault key doesn't exist, the step raises `CollectorAuthError` and the session bootstrap fails.
-
-**5.6 — Session bundle encryption**
-After a successful login, `context.storage_state()` returns a dict with `cookies` and `origins` (localStorage). This is encrypted with AES-256 and written to `browser_sessions`:
-- `cookies` (encrypted JSON)
-- `local_storage` (encrypted JSON)
-- `session_headers` (encrypted JSON, captured Auth headers if any)
-- `csrf_token` (encrypted)
-- `is_valid=True`
-- `expires_at` = now + 24h
-
-**5.7 — Two-session bootstrap for IDOR**
-If `feature_flags.idor_verification=True`, the bootstrap is run twice: once with `account_slot="primary"` and once with `account_slot="secondary"`. The credentials for each slot are stored in Vault under `secret/programs/{program_id}/account_primary` and `secret/programs/{program_id}/account_secondary`. The result is two separate `browser_sessions` rows. Both `session_id`s are attached to the `scan_context`.
-
-**5.8 — Session return to engine**
-The browser worker publishes the `session_id` back to the Core Engine via Redis result backend. The engine awaits with a timeout (120s). If the session bootstrap times out, scan proceeds with `sessions=None` and a warning is logged. Authenticated scanning is skipped but unauthenticated scanning continues.
-
-**5.9 — Session reuse in downstream stages**
-Once attached to `scan_context`:
-- Nuclei appends `-H "Cookie: {cookie_string}"` to all requests for that target
-- XSS and CORS scanners attach the session cookies to every request
-- The Exploit Verifier loads the session via `storage_state` to verify IDOR candidates
+- Core Engine publishes `session.request` to `browser.jobs`
+- Browser Worker launches fresh Playwright Chromium context per job
+- Scope enforcement via `browser_context.route("**/*", enforce_scope)` — out-of-scope requests are hard-blocked
+- YAML login scenario executed step-by-step (visit, fill, submit, wait, capture_cookies)
+- TOTP support via Vault secret resolution
+- Session bundle (cookies, localStorage, headers, CSRF) encrypted with AES-256 and stored in `browser_sessions`
+- Two-session bootstrap for IDOR verification (`primary` + `secondary` accounts)
+- Session ID returned to Core Engine via Redis result backend
 
 ---
 
-## 6. Phase 5 — API Fuzzing + JS Analysis (Stages 4.5 + 6)
+## 6. Phase 5 — API Fuzzing + JS Analysis (Stages 4.5 + 6) *(planned: M6)*
 
-### Stage 4.5 — API Fuzzing
-**Worker:** `api-fuzzer-worker` (Celery)
-**Queue:** `api.fuzz.jobs`
-**Triggered:** After Stage 4 completes, runs in parallel with Stage 5
+> The `api_fuzzer_worker/worker.py` and `js_analysis_worker/worker.py` currently exist as skeletons. Stage 4.5 and enhanced Stage 6 will be implemented in M6.
 
-**6.1 — Schema discovery**
-During Stage 3 enumeration, the engine attempts to fetch API schemas from well-known paths: `/openapi.json`, `/swagger.json`, `/api-docs`, `/graphql` (introspection query). Raw schemas are stored in `api_schemas`.
+### Stage 4.5 — API Fuzzing (designed)
+- Schema discovery from `/openapi.json`, `/swagger.json`, `/graphql`
+- Schemathesis property-based + RESTler stateful fuzzing
+- Custom ffuf-based mutation for endpoints without schemas
+- Anomaly detection: 500s where 400s expected, cross-user data, authorization degradation
 
-**6.2 — Fuzzing strategy**
-For endpoints with schemas: Schemathesis runs property-based testing, generating inputs that satisfy and violate the schema contract simultaneously. RESTler runs stateful fuzzing — it chains API calls to reach states that single-request testing cannot reach.
-
-For endpoints without schemas: A custom ffuf-based mutator runs path and parameter fuzzing using mutation tables:
-- Integer fields → 0, -1, max_int, type confusion strings
-- String fields → empty, null, SQLi patterns, SSTI payloads
-- Required fields → omitted entirely
-- Amount/price fields → negative, fractional, integer overflow
-- UUID fields → own user's ID, another user's ID, null UUID
-
-**6.3 — Anomaly detection**
-Response analysis looks for:
-- HTTP 500 where HTTP 400 was expected (server error on invalid input = logic flaw)
-- Response body containing data belonging to a different user (state confusion)
-- Authorization degradation (action succeeds without a required role)
-- Inconsistent state after parallel requests (race condition signal)
-
-Each anomaly produces a candidate `Finding` with `vulnerability_type=business_logic`.
-
-### Stage 6 — Enhanced JS Analysis (M6+)
-**Worker:** `js-analysis-worker` (Celery)
-**Queue:** `js.analysis.jobs`
-
-**6.4 — Static analysis pipeline**
-- Downloads each JS file from MinIO.
-- Runs Semgrep with a custom security ruleset targeting web app patterns.
-- Builds AST using esprima or tree-sitter.
-- AST traversal checks for:
-  - DOM XSS sinks: `innerHTML=`, `document.write()`, `eval()`, `setTimeout(string_var)`
-  - Prototype pollution: `__proto__` assignment, `constructor[prototype]`
-  - Unsafe `postMessage`: origin check missing in message event handlers
-- Regex secret scanning runs here (moved from Stage 6 baseline in M3).
+### Stage 6 Enhanced — JS Analysis (designed)
+- Semgrep with custom security ruleset
+- AST analysis: DOM XSS sinks, prototype pollution, unsafe postMessage
+- Current M3 implementation only runs regex patterns (already in `js_secrets.py`)
 
 ---
 
-## 7. Phase 6 — Behavioral Scenarios (Stage 7)
+## 7. Phase 6 — Behavioral Scenarios (Stage 7) *(planned: M9)*
 
-**Worker:** `scenario-runner` (Celery)
-**Queue:** `scenario.jobs`
-**Triggered:** After Stages 5 + 6 complete (Group B), runs as Group C
-**Feature flag:** `ENABLE_SCENARIO_RUNNER` (off by default)
+> The `scenario_runner/worker.py` currently exists as a skeleton. Stage 7 will be implemented in M9.
 
-**7.1 — Scenario selection**
-The Core Engine selects scenarios from the built-in library based on the target's technology stack fingerprint. A payment endpoint → `race_transfer.yaml`. An admin panel → `priv_escalation_role.yaml`. A multi-step checkout → `workflow_skip_payment.yaml`.
-
-**7.2 — Race condition testing**
-Primary path (identical request bodies): nuclei race templates with `-race -race_count 20`. The nuclei engine implements the gate mechanism internally — all request bodies are held until the last byte can be sent simultaneously.
-
-Secondary path (different request bodies): `h2spacex` is used. It:
-1. Opens an H2 TLS connection to the target
-2. Sends all request headers and bodies for all slots EXCEPT the final DATA frame
-3. Releases all final DATA frames simultaneously in a single TCP write
-
-**Connection warming** runs before every burst:
-- 3 warmup requests are sent to the exact target endpoint
-- 100ms sleep after warmup
-- This stabilizes TCP slow-start before the burst window
-
-**7.3 — Three-signal outcome detection**
-After the burst:
-- **Signal 1 — State divergence:** GET the resource before and after the burst. If the state changed in a way inconsistent with a single operation (e.g., balance decreased by more than one debit), the race fired.
-- **Signal 2 — Response divergence:** If the burst of N identical requests returns N-1 identical responses and 1 different one, the minority response indicates a race.
-- **Signal 3 — Timing outlier:** If one response in the burst took > 3 standard deviations longer than the others, this indicates lock contention — a signal that the server noticed and handled (or failed to handle) a concurrent access.
-
-Any signal firing produces a candidate `Finding` with `vulnerability_type=race_condition`.
-
-**7.4 — Privilege escalation scenarios**
-The scenario runner loads the secondary browser session via `storage_state`. It navigates to endpoints that require an elevated role (e.g., admin-only). If access is granted to the secondary (unprivileged) account, a `privilege_escalation` candidate is produced.
-
-**7.5 — Workflow bypass scenarios**
-Multi-step flows (register → verify email → pay → get product) are navigated by skipping intermediate steps and going directly to the final step. If the final step succeeds without the prior steps, a `workflow_bypass` candidate is produced.
+Designed behavior includes race condition testing (nuclei `-race` + h2spacex), privilege escalation scenarios, and workflow bypass testing.
 
 ---
 
-## 8. Phase 7 — Exploit Verification (Stage 8)
+## 8. Phase 7 — Exploit Verification (Stage 8) *(planned: M7)*
 
-**Worker:** `exploit-verifier` (Celery)
-**Queue:** `verify.jobs`
-**Triggered:** After all candidate-producing stages complete
-**This is the most important quality gate. Nothing reaches the Reporter without passing here.**
+> The `exploit_verifier/worker.py` currently exists as a skeleton. Stage 8 will be implemented in M7.
 
-All candidates from Stages 4, 4.5, 5, 6, 7, and 9 flow through this stage.
-
-### XSS Verification
-1. A unique `payload_marker` string is embedded in the payload (e.g., `alert('xss-{uuid}')`)
-2. A headless Chromium browser (CDP session — Chromium only) navigates to the target URL with the payload
-3. A `Runtime.consoleAPICalled` event listener watches for the marker in console output
-4. If the marker fires within 10 seconds: `is_verified=True`, screenshot captured
-5. If the marker does not fire: `is_false_positive=True`, `false_positive_reason='payload_did_not_execute'`
-
-### SSRF Verification
-1. Register an OOB URL with the self-hosted Interactsh server. Get back a `correlation_id` (exactly 33 lowercase alphanumeric characters)
-2. Start the polling loop **before** injecting the payload
-3. 500ms delay, then inject the OOB URL as the SSRF payload into the target parameter
-4. Poll Interactsh every 3 seconds for 45 seconds, looking for `data` containing the `correlation_id`
-5. If an interaction is received (DNS, HTTP, or LDAP): `is_verified=True`, `oob_interaction.json` stored in MinIO
-6. If no interaction received: `is_false_positive=True`, `false_positive_reason='no_oob_callback'`
-
-**Why DNS detection matters:** Many WAFs block outbound HTTP while allowing DNS. DNS-only callbacks confirm SSRF even when HTTP callbacks are blocked.
-
-### IDOR Verification
-1. Load the secondary browser session from `browser_sessions` via `storage_state`
-2. Use that context to make a request to the resource owned by the primary user
-3. Parse the response — check if it contains the primary user's data (by comparing against known primary-user identifiers captured during session bootstrap)
-4. If cross-user data is returned: `is_verified=True`
-5. If access is denied (401/403 or no cross-user data): `is_false_positive=True`
-
-### CORS Verification
-1. Send a request to the affected endpoint with `Origin: https://attacker.example.com`
-2. Check `Access-Control-Allow-Origin` header — must reflect the attacker's exact origin (not `*`)
-3. If credentialed requests are implicated: also check `Access-Control-Allow-Credentials: true`
-4. Both conditions must be true for `is_verified=True`
-
-### SQLi Verification
-1. **Error-based:** Inject known error-triggering payloads, check response body for DB error strings (MySQL, PostgreSQL, MSSQL patterns)
-2. **Time-based blind:** Inject known sleep payloads (`SLEEP(5)`, `pg_sleep(5)`, `WAITFOR DELAY`), measure response time. If delta > 4 seconds: `is_verified=True`
-
-### Secret Verification
-1. Take the discovered API key/token
-2. Make an actual authentication request to the relevant API (AWS STS `GetCallerIdentity`, Stripe `/v1/balance`, etc.)
-3. If authentication succeeds: `is_verified=True`, `false_positive_reason` stays null
-4. If authentication fails (key inactive, revoked): `is_verified=False`, `is_false_positive=True`, `false_positive_reason='key_inactive'`
-
-### Evidence Bundle Assembly
-For every `is_verified=True` finding, the verifier stores in MinIO under `evidence/{finding_id}/`:
-- `screenshot.png` — headless browser screenshot at the moment of exploitation
-- `request_response.txt` — raw HTTP request + full response
-- `payload.txt` — exact payload used
-- `oob_interaction.json` — Interactsh callback receipt (SSRF/blind cases only)
-
-Each file path is recorded in `finding_evidence`.
-
-### False Positive Handling
-- `is_false_positive=True` findings are retained in the database but excluded from reports
-- `false_positive_reason` records why (e.g., `no_oob_callback`, `payload_did_not_execute`, `key_inactive`)
-- A Prometheus counter tracks `attackbot_false_positive_rate = unverified_count / candidate_count` per scan
-- A Grafana panel displays rolling FP rate — alerting fires if it exceeds 40%
+Designed behavior includes verification strategies for XSS (CDP session), SSRF (Interactsh OOB), IDOR (cross-session), CORS, SQLi (time-based blind), and secrets (live key auth), plus evidence bundle assembly in MinIO.
 
 ---
 
-## 9. Phase 8 — AI Hypothesis (Stage 9)
+## 9. Phase 8 — AI Hypothesis (Stage 9) *(planned: M10)*
 
-**Worker:** `ai-analysis-worker` (Celery)
-**Queue:** `ai.analysis.jobs`
-**Feature flag:** `ENABLE_AI_HYPOTHESIS` (off by default)
-**Triggered:** After Stage 8 (needs verified findings as context)
+> The `ai_analysis_worker/worker.py` currently exists as a skeleton. Stage 9 will be implemented in M10.
 
-**9.1 — Context bundle construction**
-The AI worker builds a prompt from scan artifacts, respecting a `MAX_PROMPT_TOKENS=6000` budget. It includes:
-- Endpoint list with methods, paths, and parameter names
-- Response code anomalies (all 500s, unexpected 200s on privileged paths)
-- Technology stack fingerprint
-- Short JS snippets containing sinks or secrets
-- Summary of already-verified findings
+Designed behavior: Ollama (llama3.1:8b), structured hypothesis generation with schema constraint, three-layer reliability, confidence threshold filtering, and routing hypotheses through the Exploit Verifier.
 
-It excludes:
-- Full response bodies
-- Binary/image content
-- Out-of-scope assets
-- Full JS files
-- Duplicate endpoint variants
+---
 
-**9.2 — Structured hypothesis generation**
-The LLM (llama3.1:8b via Ollama) is prompted with a schema constraint. Output must match:
-```json
-{
-  "hypotheses": [
-    {
-      "hypothesis": "string",
-      "reasoning": "string",
-      "affected_endpoint": "string",
-      "suggested_method": "GET|POST|PUT|DELETE|PATCH",
-      "suggested_payload": {},
-      "confidence": 0.0–1.0,
-      "vulnerability_class": "idor|xss|ssrf|sqli|auth_bypass|business_logic|..."
-    }
-  ]
-}
+## 10. Phase 9 — Aggregation (Stage 10)
+
+**File:** `pipeline/aggregator.py` → `run(ctx, scan_result, repo, publisher)`
+
+**Purpose:** Deduplicate findings, persist to database, group vulnerabilities, finalize scan status, and publish to `report.jobs`.
+
+> Stage 10 is the only FATAL stage besides Stage 0. If aggregation fails, the scan is marked `failed_internal`.
+
+### Step-by-step:
+
+**10.1 — Finding deduplication:**
+- `dedup.py` → `compute_dedup_hash(candidate)`:
+  ```
+  SHA256( vulnerability_type | normalize_url(affected_url) | affected_parameter | payload[:100] )
+  ```
+- URL normalization: sorts query parameters so `?b=2&a=1` and `?a=1&b=2` produce the same hash
+- Duplicates produced by overlapping stages (e.g., nuclei and web_vuln_tests both find the same XSS) are collapsed
+- Stats logged: before count, after count, duplicates removed
+
+**10.2 — Finding persistence:**
+- `ScanRepository.save_findings(scan_id, program_id, candidates)`:
+  - For each `FindingCandidate`:
+    - Compute `deduplication_hash`
+    - INSERT into `findings` with ON CONFLICT (deduplication_hash, scan_id) — do nothing
+    - Set `is_verified=False`, `is_false_positive=False`
+    - Assign `finding_id` UUID
+  - Returns count of new findings saved (excluding duplicates)
+
+**10.3 — Severity breakdown:**
+```python
+breakdown = {"critical": 0, "high": 0, "medium": 0, "low": 0, "info": 0}
+for candidate in deduped:
+    breakdown[candidate.severity.lower()] += 1
 ```
 
-**9.3 — Three-layer reliability**
-1. Schema-constrained generation (`format=schema, temperature=0`)
-2. Markdown fence stripping (leaked fences stripped with regex)
-3. Pydantic validation (malformed output caught, retried up to 3 times)
+**10.4 — Scan status determination:**
+- If `scan_result.stage_errors` has any entries → `status = "partial"`
+- Otherwise → `status = "completed"`
+- If partial: `partial_detail = {"failed_stages": [...], "errors": {...}}`
 
-On exhausted retries: returns empty list (fail open — no crash, scan continues).
+**10.5 — Scan finalization:**
+- `ScanRepository.mark_scan_complete()`:
+  - Updates `scans` row: `status`, `finding_count`, `severity_breakdown`, `partial_detail`, `error_detail`
+  - Sets `completed_at = NOW()`
 
-**9.4 — Confidence threshold**
-Only hypotheses with `confidence >= 0.6` proceed. Low-confidence generic suggestions (e.g., "check for XSS" with no specific endpoint) are filtered out here.
-
-**9.5 — Hypothesis-to-verification pipeline**
-Each hypothesis that passes the threshold is converted into a `verify.jobs` message — it goes through the same Exploit Verifier as all other candidates. If the verifier confirms it: `is_verified=True`, `source='ai_hypothesis'` recorded in `findings`. AI never writes directly to findings.
-
----
-
-## 10. Phase 9 — Aggregation + Graph (Stage 10)
-
-**Stage 10 is the only FATAL stage besides Stage 0.** If aggregation fails, the scan is marked `failed_internal`.
-
-### Finding Deduplication
-Before persistence, every candidate finding's `deduplication_hash` is computed:
-```
-SHA256( vulnerability_type | normalize_url(affected_url) | affected_parameter | payload[:100] )
-```
-URL normalization sorts query parameters so `?b=2&a=1` and `?a=1&b=2` produce the same hash. Duplicates produced by overlapping stages (e.g., nuclei and web_vuln_tests both find the same XSS) are collapsed to the first instance.
-
-### Vulnerability Groups
-Findings are grouped by `vulnerability_type` and domain. `vulnerability_groups` rows summarize the count and max severity per type. These are used by the Reporter for the Executive Summary table.
-
-### Attack Graph Ingestion
-All `is_verified=True` findings are ingested into Neo4j:
-1. Each finding becomes a `Finding` node (`MERGE` on `finding_id`)
-2. Each asset becomes an `Asset` node
-3. Each endpoint becomes an `Endpoint` node
-4. Edges are created: `Asset -[:EXPOSES]-> Endpoint -[:HAS_FINDING]-> Finding`
-5. Session/credential nodes are created for browser sessions
-6. Edge inference rules run:
-   - `Finding {type: subdomain_takeover} -[:CONTROLS]-> Cookie {domain endsWith affected_domain}`
-   - `Finding -[:CHAINS_TO]-> Finding` only when connected through a shared asset — never inferred between unrelated findings
-
-### Exploit Chain Detection
-Cypher queries detect multi-hop chains:
-- **Chain 1:** Subdomain Takeover → Cookie Control → Auth Bypass → IDOR/Privilege Escalation
-- **Chain 2:** JS Secret Leak → Credential → Endpoint → Auth Bypass
-
-For each detected chain:
-- Combined severity is computed: max severity of all findings in chain; if ≥3 medium findings: escalated to high
-- An `exploit_chains` row is written to Postgres
-- The `graph_path_ids` column stores Neo4j node IDs for traceability
-
-### Scan Finalization
-- `scans.status` is updated: `completed`, `partial` (if non-fatal stage failures), `failed_scope`, or `failed_internal`
-- `finding_count` and `severity_breakdown` are written
-- If `partial`: `partial_detail` JSON records which stages failed and why
-
-### Publication to Report Queue
-A `scan.completed` message is published to `report.jobs` containing:
-- `scan_id`, `program_id`
-- `status`, `has_findings`, `finding_count`, `verified_count`
-- `severity_breakdown`
-- `exploit_chains` list (chain UUIDs)
-- `formats_requested` (pdf, docx, or both)
+**10.6 — Report queue publish:**
+- Constructs `ReportJobsPayload`:
+  ```python
+  ReportJobsPayload(
+      scan_id=ctx.scan_id,
+      program_id=ctx.program_id,
+      status=status,
+      partial_stages=list(scan_result.stage_errors.keys()),
+      has_findings=saved_count > 0,
+      finding_count=saved_count,
+      verified_count=0,  # verification not yet implemented (M7)
+      severity_breakdown=SeverityBreakdown(...),
+  )
+  ```
+- Wraps in `MessageEnvelope` via `build_report_job_message(payload)`
+- Publishes to `report.jobs` via `QueuePublisher.publish()`
+- Records a `scan_stages` row for stage 10.1 (`report_handoff`)
+- On publish failure: logs error, records failed stage, but scan is still marked complete
 
 ---
 
@@ -512,49 +739,40 @@ A `scan.completed` message is published to `report.jobs` containing:
 
 **Service:** `reporter` (:8003) + `reporter-worker` (Celery)
 **Queue consumed:** `report.jobs`
-**Outputs:** PDF and/or DOCX file in MinIO; row in `reports`
+**Current state:** Reporter worker validates and logs messages but generation is NOT implemented.
 
-### Step-by-step
+### Current Implementation
 
-**11.1 — Data fetch**
-The reporter-worker fetches:
-- Full scan detail from `GET /api/v1/scans/{scan_id}` (Core Engine)
-- All `is_verified=True` findings from `GET /api/v1/scans/{scan_id}/findings?verified=true` (Core Engine)
-- Program metadata and scope from `GET /api/v1/programs/{program_id}` (Scraper)
-- Exploit chain details from `GET /api/v1/chains/{chain_id}` (Attack Graph Engine)
+**File:** `reporter/worker.py`
 
-**11.2 — ParsedScan construction**
-All fetched data is normalized into a `ParsedScan` dataclass. The constructor checks `len(findings) > 0` and sets `has_findings`. All downstream generators check `get_report_mode()` first — a zero-finding scan produces a "No Findings" report without crashes or empty tables.
+The reporter worker uses a raw Kombu consumer (not a Celery task) to consume `report.jobs`:
 
-**11.3 — Reproduction pack generation**
-For every finding, a `reproduction_packs` row is created with:
-- `curl_command`: a complete, copy-pasteable curl one-liner with all headers, cookies, and payload
-- `http_request_raw`: the raw HTTP request block (method, path, headers, body)
-- `browser_steps`: numbered human-readable steps ("1. Navigate to ...", "2. Enter payload in ... field", etc.)
+1. `ReportJobsConsumerStep` (Celery bootstep) creates a `Consumer` on the `report.jobs` queue
+2. On message receipt → `_on_report_jobs_message(body, message)`:
+   - The raw body is coerced to a dict (handles bytes, str, or dict)
+   - Parsed into `MessageEnvelope`
+   - Validated: `event_type == "scan.completed"`, `schema_version == "1.x"`
+   - Payload extracted as `ReportJobsPayload`
+   - All details logged: scan_id, program_id, finding_count, severity_breakdown, formats_requested
+   - **Then:** `log.warning("report_generation_not_yet_implemented")` — this is where M4 will add actual generation
+   - Message is always acknowledged (prevents redelivery loops)
+3. A compatibility task (`reporter_worker_task`) exists for messages sent as Celery tasks rather than raw messages
 
-**11.4 — PDF generation**
-Using reportlab or weasyprint:
-- **Page 1:** Cover (program name, scan date, severity summary donut chart)
-- **Executive Summary:** Total findings, severity breakdown table, key risk narrative
-- **Scope Overview:** In-scope assets tested, assets discovered, coverage notes
-- **Findings Table:** All findings sorted by severity, one row each
-- **Per-Finding Detail** (one page per finding): title, severity badge (color-coded), CVSS score and vector, affected URL, description, reproduction steps, curl command, evidence screenshot thumbnail
-- **Exploit Chains** (if any): step-by-step chain narrative with escalated severity callout
-- **Appendix:** Full reproduction packs (curl, raw HTTP, browser steps) for all findings
+**File:** `reporter/main.py`
 
-Severity color coding: Critical = red (#FF0000), High = orange (#FF6600), Medium = yellow (#FFCC00), Low = blue (#0066CC), Informational = grey.
+The reporter FastAPI app provides:
+- Health endpoint at `GET /api/v1/health` (checks DB, RabbitMQ, MinIO)
+- Prometheus instrumentation
+- No report APIs yet (download, regenerate, etc. — these come in M4)
 
-**11.5 — DOCX generation**
-Using python-docx, same section structure. Tables for findings. Styled heading levels. Code blocks for curl and HTTP raw. Inline images for screenshots.
-
-**11.6 — MinIO upload**
-Files are uploaded to `reports/{report_id}/report.pdf` and `reports/{report_id}/report.docx`. Storage paths are written to `reports.storage_path`. No public access is set on the bucket — all downloads go through the Reporter API's pre-signed URL endpoint.
-
-**11.7 — Watchdog**
-An APScheduler job queries `reports WHERE status='generating' AND created_at < NOW() - INTERVAL '30 minutes'`. Stale rows are marked `failed`, `error_detail='watchdog_timeout'`. The report can be regenerated via `POST /api/v1/reports/generate`.
-
-**11.8 — Completion event**
-A `report.generated` message is published to `reports.completed` with the `report_id` and download URL template.
+### M4 Planned Implementation
+- Fetch scan + findings + program from Core Engine + Scraper APIs
+- Build `ParsedScan` dataclass with zero-finding guard
+- Generate PDF (reportlab/weasyprint) and DOCX (python-docx)
+- Upload to MinIO `reports/{report_id}/`
+- Curl command + raw HTTP + browser steps per finding
+- Watchdog for stale report recovery
+- `GET /api/v1/reports/{report_id}/download` → pre-signed MinIO URL
 
 ---
 
@@ -562,56 +780,46 @@ A `report.generated` message is published to `reports.completed` with the `repor
 
 This is intentionally outside the automated pipeline.
 
-**12.1 — Download**
-`GET /api/v1/reports/{report_id}/download` on the Reporter service (via API Gateway) returns a temporary pre-signed MinIO URL valid for 15 minutes. The report is downloaded by the user.
-
-**12.2 — Review**
-The user reviews the report. The automated pipeline produces evidence-backed findings, but submission decisions require human judgment:
-- Is the finding in scope for the current program bounty?
-- Has this vulnerability class been reported before (duplicate check)?
-- Is the CVSS score consistent with the platform's bounty table?
-- Does the reproduction pack work end-to-end in a manual test?
-
-**12.3 — Submission**
-The user submits the report directly on the bug bounty platform. AttackBot does not perform automated submission — this is a deliberate safeguard against submitting unreviewed findings or duplicates.
+1. **Download:** `GET /api/v1/reports/{report_id}/download` returns a temporary pre-signed MinIO URL (M4).
+2. **Review:** User reviews the report — checks scope, duplicate status, CVSS accuracy.
+3. **Submission:** User submits directly on the bug bounty platform. AttackBot never auto-submits.
 
 ---
 
 ## 13. Failure Flows
 
 ### Scan fails at Stage 0 (scope fatal)
+- **Code path:** `_async_scan_pipeline()` catches `ScanError` or empty scope from `_fetch_scope_from_scraper()`
 - `scans.status = failed_scope`
 - No assets, endpoints, or findings are created
-- `report.jobs` message is NOT published — no report is generated
-- The program's `queued_for_scan` flag is left as-is
-- Human intervention required: check if scope entries in `program_scopes` are parseable
+- `report.jobs` message is NOT published
+- The Redis lock is released
 
 ### Worker crashes mid-scan
-- `task_acks_late=True` means the message is redelivered by RabbitMQ
-- If `retry_count < 2`: the scan is retried automatically
-- If `retry_count >= 2`: the scan is permanently marked `failed_internal`
-- The watchdog catches any scans not recovered by this mechanism after 2 hours
+- `task_acks_late=True` means RabbitMQ redelivers the message
+- `task_reject_on_worker_lost=True` sends to DLQ on worker death
+- On redelivery: `ScanRepository.create_or_resume_scan()` resumes the existing scan row (prevents duplicate scan records)
+- If `retry_count >= 2`: watchdog marks permanently `failed_internal`
 
 ### Publish failure (scan.jobs → Core Engine)
-- `queued_for_scan=True` is set on the program
-- Reconciler retries publish every 5 minutes
-- Programs older than 7 days are not auto-retried
+- **Scraper path:** `queued_for_scan=True` set on the program. Reconciler retries every 5 minutes.
+- **Core Engine path:** `_enqueue_scan()` raises `HTTPException(503)`.
 
-### Browser session bootstrap fails
-- If timeout or auth error: scan continues with `sessions=None`
+### Browser session bootstrap fails *(planned: M5)*
+- Scan continues with `sessions=None`
 - Authenticated-only stages are skipped
-- Unauthenticated findings are still produced and reported
 - `scan.partial_detail` records the session failure reason
 
-### Report generation fails
+### Report generation fails *(planned: M4)*
 - Reporter watchdog marks the report `failed` after 30 minutes
 - Report can be regenerated via API without re-running the scan
-- Finding data is already in the database — generation only reads, never re-scans
 
-### Interactsh server unreachable (during SSRF verification)
-- SSRF candidates are marked `is_false_positive=True` with `false_positive_reason='interactsh_unavailable'`
-- They are retained in the database but excluded from the report
-- A warning is logged with the failed interaction attempt
+### Individual pipeline stage fails (non-fatal)
+- **Code path:** `_execute_pipeline()` catches exceptions per-stage
+- Error message stored in `scan_result.stage_errors[stage_name]`
+- `ScanRepository.record_stage()` records the failure with `status="failed"` and `error_detail`
+- Pipeline continues to next stage
+- Final scan status becomes `"partial"` instead of `"completed"`
 
 ---
 
@@ -619,55 +827,140 @@ The user submits the report directly on the bug bounty platform. AttackBot does 
 
 ```
 Platform API
-  → [Scraper normalizes] → programs, program_scopes, program_policies (Postgres)
-  → [scan.jobs] → scan record created (Postgres)
-  → [Stage 1] → assets (Postgres)
-  → [Stage 2] → assets.technology_stack updated (Postgres)
-  → [Stage 3] → endpoints (Postgres), JS files (MinIO + js_assets Postgres)
-  → [Stage 3.5] → browser_sessions (Postgres, encrypted)
-  → [Stages 4, 4.5, 5, 6, 7, 9] → findings [unverified candidates] (Postgres)
-  → [Stage 8] → findings [is_verified=True] (Postgres)
-              → finding_evidence (Postgres) + evidence files (MinIO)
-              → findings [is_false_positive=True] (Postgres, excluded from reports)
-  → [Stage 10] → vulnerability_groups (Postgres)
-              → Neo4j graph nodes + edges
-              → exploit_chains (Postgres)
-  → [report.jobs] → reproduction_packs (Postgres)
-                  → report file (MinIO)
-                  → reports (Postgres)
+  → [Scraper: collectors/hackerone.py] → programs, program_scopes, program_policies (Postgres)
+  → [Scraper: publisher.py] → scan.jobs (RabbitMQ)
+  → [Core Worker: worker.py → scan_task.py] → scan record created (Postgres)
+  → [Stage 0: scope_filter.py] → ScopeFilter built in-memory (fatal guard)
+  → [Stage 1: asset_discovery.py] → assets (Postgres)
+  → [Stage 2: fingerprinting.py] → assets.technology_stack + waf_detected updated (Postgres)
+  → [Stage 3: enumeration.py] → endpoints (Postgres), JS files (MinIO js-assets/ + js_assets Postgres)
+  → [Stage 3.5: planned M5] → browser_sessions (Postgres, encrypted)
+  → [Stages 4, 4.5, 5, 6, 7, 9] → finding_candidates (in-memory, is_verified=False)
+  → [Stage 8: planned M7] → findings updated (is_verified=True/is_false_positive=True)
+  → [Stage 10: aggregator.py] → findings (Postgres, deduplicated)
+                               → vulnerability_groups (Postgres) [planned]
+                               → Neo4j graph nodes + edges [planned M8]
+                               → exploit_chains (Postgres) [planned M8]
+  → [aggregator.py → report.jobs] → reporter-worker receives message
+  → [reporter: planned M4] → reproduction_packs (Postgres)
+                            → report file (MinIO reports/)
+                            → reports (Postgres)
   → [User] → downloads report → manual review → platform submission
 ```
 
+**What is implemented now (M3):**
+
+```
+Scraper → scan.jobs → Core Worker → Stage 0 → 1 → 2 → 3 → (4 ∥ 5) → 6 → 10 → report.jobs → Reporter (logs only)
+```
+
 **Storage by system:**
-| Data | Where |
-|------|-------|
-| Program metadata | Postgres |
-| Scan + findings | Postgres |
-| Browser sessions (encrypted) | Postgres |
-| Report files (PDF, DOCX) | MinIO |
-| Screenshots + evidence | MinIO |
-| JS files (deduplicated) | MinIO |
-| Attack graph | Neo4j |
-| Distributed locks | Redis |
-| Task results | Redis |
-| Secrets + credentials | Vault |
+| Data | Where | Implemented? |
+|------|-------|--------------|
+| Program metadata | Postgres | ✅ M2 |
+| Scan + findings | Postgres | ✅ M3 |
+| Assets + endpoints | Postgres | ✅ M3 |
+| JS files (deduplicated) | MinIO | ✅ M3 |
+| Browser sessions (encrypted) | Postgres | 🔲 M5 |
+| Report files (PDF, DOCX) | MinIO | 🔲 M4 |
+| Screenshots + evidence | MinIO | 🔲 M7 |
+| Attack graph | Neo4j | 🔲 M8 |
+| Distributed locks | Redis | ✅ M2 |
+| Task results | Redis | ✅ M3 |
+| Secrets + credentials | Vault | ✅ M1 (placeholder) |
 
 ---
 
 ## 15. Decision Points and Guards
 
-| Point | Condition | Action |
-|-------|-----------|--------|
-| Scan start | `scan:lock:{program_id}` held | Skip — existing scan in progress |
-| Stage 0 | `in_scope` list is empty | FATAL — `status=failed_scope`, stop |
-| Stage 1 | Asset fails `ScopeFilter` | Drop asset silently, continue |
-| Every stage | Asset/endpoint fails `ScopeFilter` | Drop and log — never skip the check |
-| Stage 3.5 | TOTP secret not in Vault | `CollectorAuthError`, session=None, scan continues |
-| Stage 3.5 | Session bootstrap times out | session=None, scan continues without auth |
-| Stage 8 | `retry_count >= 2` | Watchdog does NOT republish — permanent failure |
-| Stage 8 | Interactsh unreachable | SSRF candidate → `is_false_positive=True` |
-| Stage 9 | LLM retries exhausted | Return empty list — scan continues without hypotheses |
-| Stage 10 | Aggregation fails | FATAL — `status=failed_internal` |
-| Report generation | `has_findings=False` | Generate "No Findings" report — never skip or crash |
-| MinIO upload | Any bucket | Never `mc anonymous set download` — all access via pre-signed URL |
-| All queues | Passive declare only | Avoids RabbitMQ argument mismatch errors on restart |
+| Point | Condition | Action | Code Location |
+|-------|-----------|--------|---------------|
+| Scan start | `scan:lock:{program_id}` held | Skip — existing scan in progress | `scan_task.py` → `_async_scan_pipeline()` |
+| Stage 0 | `in_scope` list is empty | FATAL — `status=failed_scope`, stop | `scope_filter.py` → `ScopeFilter.__init__()` |
+| Stage 0 | Scope API returns error | FATAL — `status=failed_scope`, stop | `scan_task.py` → `_fetch_scope_from_scraper()` |
+| Stage 1 | Asset fails `ScopeFilter` | Drop asset silently, continue | `asset_discovery.py` → `scope_filter.filter_targets()` |
+| Stage 3 | JS download fails | Log warning, continue | `enumeration.py` → `_download_and_store_js()` |
+| Stage 4 | nuclei exits with code 1 | Not an error — zero findings | `nuclei_scan.py` → `run()` |
+| Stage 4 | nuclei exits with code 2 | Log with classified reason, raise | `nuclei_scan.py` → `_classify_exit_code_2_reason()` |
+| Stage 5 | SQLi/SSRF feature flags off | Skip those tests | `web_vuln_tests.py` → `_test_endpoint()` |
+| Stage 5 | CRLF feature flag off | Skip CRLF test | `web_vuln_tests.py` → `_test_endpoint()` |
+| Stage 6 | JS file download from MinIO fails | Log warning, skip file | `js_secrets.py` → `run()` |
+| Stage 10 | Aggregation fails | FATAL — `status=failed_internal` | `scan_task.py` → `_execute_pipeline()` |
+| Stage 10 | report.jobs publish fails | Log error, record failed stage, scan still marked complete | `aggregator.py` → `run()` |
+| Any non-fatal stage | Stage raises exception | Log to `stage_errors`, continue | `scan_task.py` → `_execute_pipeline()` |
+| Watchdog | Scan running > 2h | Mark `failed_internal`, republish if retries < 2 | `watchdog.py` + `main.py` |
+| Report queue | Message validation fails | Log error, ack message, do not crash | `reporter/worker.py` → `_handle_report_job_message()` |
+
+---
+
+## 16. Code-to-Flow Reference Map
+
+This table maps every major code file to its role in the system flow.
+
+### Shared Library (`backend/shared/`)
+
+| File | What It Does |
+|------|-------------|
+| `config.py` | `BaseServiceConfig` — all services inherit environment variable loading |
+| `logging.py` | structlog JSON logger — `configure_logging()` + `get_logger()` |
+| `db.py` | SQLAlchemy async engine — `init_db()`, `get_session()`, `check_db_health()` |
+| `health.py` | `HealthResponse` + `HealthStatus` enum for `/api/v1/health` endpoints |
+| `exceptions.py` | Exception hierarchy: `AttackBotError` → `ScanError`, `ScopeFatalError`, `QueueError`, etc. |
+| `queue.py` | `QueuePublisher` (passive declare + publish), `Queues` constants, DLQ arguments |
+| `vault.py` | HashiCorp Vault client — `init_vault()`, `get_secret()`, `put_secret()` |
+| `storage.py` | MinIO client — `init_storage()`, `upload_bytes()`, `download_bytes()`, `get_presigned_url()` |
+| `schemas/envelope.py` | `MessageEnvelope` Pydantic model + `build_envelope()` factory |
+| `schemas/scan_jobs.py` | `ScanJobsPayload`, `FeatureFlags`, `ScopeDefinition`, `ScopeEntry` + builder |
+| `schemas/report_jobs.py` | `ReportJobsPayload`, `SeverityBreakdown` + builder |
+
+### Scraper Service (`backend/services/scraper/`)
+
+| File | What It Does |
+|------|-------------|
+| `main.py` | FastAPI app: scrape trigger, program APIs, scheduler setup, Redis locking |
+| `collectors/base.py` | `BaseCollector` ABC, `CollectorRegistry` |
+| `collectors/hackerone.py` | HackerOne API v1 client — pagination, 429 retry, structured scopes |
+| `scope_parser.py` | `ScopeParser` — converts raw scope entries to typed `ProgramScope` objects |
+| `repository.py` | `ProgramRepository` — upsert programs/scopes/policies with flag preservation |
+| `publisher.py` | `ScraperPublisher` — wraps `QueuePublisher` with `queued_for_scan` flag management |
+| `reconciler.py` | APScheduler job — republishes programs stuck with `queued_for_scan=True` |
+| `config.py` | `ScraperConfig` — platform credentials, scrape intervals |
+| `models.py` | Pydantic program models |
+
+### Core Engine (`backend/services/core_engine/`)
+
+| File | What It Does |
+|------|-------------|
+| `worker.py` | Celery app + `scan_task()` — entry point from `scan.jobs` queue |
+| `scan_task.py` | `run_scan_task()` → `_async_scan_pipeline()` → `_execute_pipeline()` |
+| `main.py` | FastAPI app: scan start/list/detail/findings APIs, watchdog, health |
+| `repository.py` | `ScanRepository` — all DB operations (scans, assets, endpoints, JS assets, findings, stages) |
+| `models.py` | `DiscoveredAsset`, `DiscoveredEndpoint`, `DiscoveredJsAsset`, `FindingCandidate`, `ScanResult` |
+| `dedup.py` | `compute_dedup_hash()` — SHA-256 finding deduplication |
+| `cvss.py` | `severity_to_cvss()` + `nuclei_severity()` — severity scoring |
+| `subprocess_utils.py` | `run_tool_communicate()` + `parse_jsonl()` — external tool execution |
+| `watchdog.py` | `check_stuck_scans()` — stuck scan detection and republish |
+| `startup_checks.py` | `collect_toolchain_checks()` — validates nuclei binary at worker startup |
+| `config.py` | `EngineConfig` — nuclei/httpx/ffuf rates, timeouts, template paths |
+
+### Pipeline Stages (`backend/services/core_engine/pipeline/`)
+
+| File | Stage | What It Does |
+|------|-------|-------------|
+| `context.py` | — | `ScanContext`, `ScopeDefinition`, `FeatureFlags` dataclasses |
+| `scope_filter.py` | 0 | `ScopeFilter` class — domain/wildcard/CIDR/IP matching |
+| `asset_discovery.py` | 1 | subfinder → alterx → dnsx → httpx discovery chain |
+| `fingerprinting.py` | 2 | httpx tech-detect + WAF detection enrichment |
+| `enumeration.py` | 3 | ffuf + waybackurls + JS download to MinIO |
+| `nuclei_scan.py` | 4 | nuclei template scanning with exit-code handling |
+| `web_vuln_tests.py` | 5 | XSS, CORS, CRLF scanning + passive path detection |
+| `js_secrets.py` | 6 | Regex-based secret detection (12 patterns) |
+| `aggregator.py` | 10 | Dedup, persist, severity breakdown, report.jobs publish |
+| `waf_utils.py` | — | WAF technology detection helper |
+
+### Reporter Service (`backend/services/reporter/`)
+
+| File | What It Does |
+|------|-------------|
+| `main.py` | FastAPI skeleton — health endpoint only |
+| `worker.py` | Raw Kombu consumer — validates report.jobs messages, logs, generation not yet implemented |

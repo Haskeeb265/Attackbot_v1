@@ -1,6 +1,6 @@
 # 🤖 AttackBot — Production-Level Low-Level Architecture
 
-> **Version:** 1.0 &nbsp;|&nbsp; **Date:** 2026-03-10 &nbsp;|&nbsp; **Scope:** Full backend platform for automated bug bounty discovery and reporting
+> **Version:** 1.1 &nbsp;|&nbsp; **Date:** 2026-03-24 &nbsp;|&nbsp; **Scope:** Full backend platform for automated bug bounty discovery and reporting
 
 ---
 
@@ -638,31 +638,31 @@ steps:
 ## 8. 🔄 Expanded Pipeline Stages
 
 ```
-Stage 0    Scope Filter
-Stage 1    Asset Discovery
-Stage 2    Fingerprinting
-Stage 3    Enumeration
-Stage 3.5  Browser Session Bootstrap       (planned: M5)
-Stage 4    Nuclei Scanning
-Stage 4.5  API Fuzzing                     (planned: M6)
-Stage 5    Web Vulnerability Tests
-Stage 6    JS Analysis
-Stage 7    Behavioral Scenario Execution   (planned: M9)
-Stage 8    Exploit Verification            (planned: M7)
-Stage 9    AI Hypothesis                   (planned: M10)
-Stage 10   Aggregation + Graph             (graph: M8)
+Stage 0    Scope Filter                    ✅ implemented (M3)
+Stage 1    Asset Discovery                 ✅ implemented (M3)
+Stage 2    Fingerprinting                  ✅ implemented (M3)
+Stage 3    Enumeration                     ✅ implemented (M3)
+Stage 3.5  Browser Session Bootstrap       🔲 planned (M5)
+Stage 4    Nuclei Scanning                 ✅ implemented (M3)
+Stage 4.5  API Fuzzing                     🔲 planned (M6)
+Stage 5    Web Vulnerability Tests         ✅ implemented (M3)
+Stage 6    JS Secret Scanning              ✅ implemented (M3)
+Stage 7    Behavioral Scenario Execution   🔲 planned (M9)
+Stage 8    Exploit Verification            🔲 planned (M7)
+Stage 9    AI Hypothesis                   🔲 planned (M10)
+Stage 10   Aggregation + Graph             ✅ implemented (M3) — graph ingestion planned (M8)
 ```
 
-**Parallelism model (current implementation):**
+**Parallelism model (current M3 implementation):**
 
 | Group | Stages |
 |---|---|
 | Group A | 4, 5 |
 
-**Sequential execution:**
+**Current sequential execution (`scan_task._execute_pipeline`):**
 
 ```
-Stages 1 → 2 → 3 → (4 ∥ 5) → 6 → 10
+Stage 0 → Stage 1 → Stage 2 → Stage 3 → (Stage 4 ∥ Stage 5) → Stage 6 → Stage 10
 ```
 
 **Future parallelism (M6+):**
@@ -843,16 +843,16 @@ Scraper
 
 ### Migration Plan
 
-| Revision | Tables | Status |
-|---|---|---|
-| 001 | programs, scans (proof of life) | ✅ Applied |
-| 002 | programs (full), program_scopes, program_policies | ✅ Applied |
-| 003 | scans (extended), scan_stages, assets, endpoints, js_assets, findings, finding_evidence, vulnerability_groups | ✅ Applied |
-| 004 | reports, reproduction_packs | 🔲 Planned (M4) |
-| 005 | browser_sessions | 🔲 Planned (M5) |
-| 006 | api_schemas | 🔲 Planned (M6) |
-| 007 | finding_evidence (extended) | 🔲 Planned (M7) |
-| 008 | exploit_chains | 🔲 Planned (M8) |
+| Revision | File in Repo | Tables | Status |
+|---|---|---|---|
+| 001 | `001_initial_schema.py` | programs, scans (proof of life) | ✅ Applied |
+| 002 | `002_scraper_full.py` | programs (full), program_scopes, program_policies | ✅ Applied |
+| 003 | `003_engine.py` | scans (extended), scan_stages, assets, endpoints, js_assets, findings, finding_evidence, vulnerability_groups | ✅ Applied |
+| 004 | — | reports, reproduction_packs | 🔲 Planned (M4) |
+| 005 | — | browser_sessions | 🔲 Planned (M5) |
+| 006 | — | api_schemas | 🔲 Planned (M6) |
+| 007 | — | finding_evidence (extended) | 🔲 Planned (M7) |
+| 008 | — | exploit_chains | 🔲 Planned (M8) |
 
 ---
 
@@ -960,16 +960,18 @@ Manual Submission
 
 ## 📈 System Totals
 
-| Component | Count |
-|---|---|
-| Postgres Tables | 18 |
-| Neo4j Node Labels | 6 |
-| Neo4j Edge Types | 7 |
-| Queues | 9 |
-| DLQs | 8 |
-| Total Queues | 17 |
-| Services | 14 |
-| Pipeline Stages | 12 |
+| Component | Count | Notes |
+|---|---|---|
+| Postgres Tables (in repo) | 11 | programs, program_scopes, program_policies, scans, scan_stages, assets, endpoints, js_assets, findings, finding_evidence, vulnerability_groups |
+| Postgres Tables (planned) | 7 | reports, reproduction_packs, browser_sessions, api_schemas, exploit_chains (+ extensions) |
+| Neo4j Node Labels | 6 | planned (M8) |
+| Neo4j Edge Types | 7 | planned (M8) |
+| Queues | 9 | |
+| DLQs | 8 | |
+| Total Queues | 17 | |
+| Services (defined in compose) | 14 | |
+| Pipeline Stages (implemented) | 8 | Stages 0, 1, 2, 3, 4, 5, 6, 10 |
+| Pipeline Stages (planned) | 4 | Stages 3.5, 4.5, 7, 8, 9 |
 
 ---
 
