@@ -746,6 +746,79 @@ class TestImports:
         assert core_worker.app is not None
 
 
+class TestCoreStartScanApi:
+    @pytest.mark.asyncio
+    async def test_start_scan_response_includes_scan_id(self):
+        import sys
+        import types
+
+        if "apscheduler.schedulers.asyncio" not in sys.modules:
+            apscheduler_mod = types.ModuleType("apscheduler")
+            schedulers_mod = types.ModuleType("apscheduler.schedulers")
+            asyncio_mod = types.ModuleType("apscheduler.schedulers.asyncio")
+
+            class _AsyncIOScheduler:
+                def __init__(self, *args, **kwargs):
+                    self.running = False
+
+                def add_job(self, *args, **kwargs):
+                    return None
+
+                def start(self):
+                    self.running = True
+
+                def shutdown(self):
+                    self.running = False
+
+            asyncio_mod.AsyncIOScheduler = _AsyncIOScheduler
+            apscheduler_mod.schedulers = schedulers_mod
+            schedulers_mod.asyncio = asyncio_mod
+            sys.modules["apscheduler"] = apscheduler_mod
+            sys.modules["apscheduler.schedulers"] = schedulers_mod
+            sys.modules["apscheduler.schedulers.asyncio"] = asyncio_mod
+
+        pytest.importorskip("aio_pika")
+        from backend.services.core_engine import main as core_main
+        from backend.shared.schemas.scan_jobs import ScanJobsPayload
+
+        payload = ScanJobsPayload(
+            program_id=str(uuid.uuid4()),
+            platform="hackerone",
+            handle="unit-test-handle",
+            scope={
+                "in_scope": [{"asset_type": "domain", "value": "example.com"}],
+                "out_of_scope": [],
+            },
+            feature_flags={"nuclei": False},
+            priority=1,
+        )
+        reserved_scan_id = "00000000-0000-0000-0000-000000000123"
+
+        with patch(
+            "backend.services.core_engine.main._build_payload_from_scraper",
+            new=AsyncMock(return_value=payload),
+        ), patch(
+            "backend.services.core_engine.main._reserve_scan_id",
+            new=AsyncMock(return_value=reserved_scan_id),
+        ), patch(
+            "backend.services.core_engine.main._enqueue_scan",
+        ) as enqueue_mock:
+            response = await core_main.start_scan(
+                {
+                    "program_id": str(payload.program_id),
+                    "priority": 1,
+                    "feature_flags": {"nuclei": False},
+                }
+            )
+
+        body = json.loads(response.body.decode("utf-8"))
+        assert response.status_code == 200
+        assert body["status"] == "queued"
+        assert body["program_id"] == str(payload.program_id)
+        assert body["scan_id"] == reserved_scan_id
+        enqueue_mock.assert_called_once_with(payload)
+
+
 # ── subprocess_utils tests (increase coverage) ──────────────────────────────
 
 class TestSubprocessUtils:
@@ -1168,6 +1241,8 @@ class TestStage1SeedFirstBehavior:
                     return json.dumps(
                         {"url": "https://beta.example.com", "status_code": 200, "tech": []}
                     ) + "\n", ""
+                if label == "httpx[explicit_scope]":
+                    return "", ""
                 raise AssertionError(f"Unexpected httpx label: {label}")
 
             raise AssertionError(f"Unexpected tool invocation: {tool}")
@@ -1208,6 +1283,51 @@ class TestStage1SeedFirstBehavior:
         assert "blocked.example.com" not in domains
         assert "outside.example.net" not in domains
         assert skipped.get("url_host_not_domain_led", 0) >= 2
+
+    @pytest.mark.asyncio
+    async def test_explicit_scope_targets_are_probed_directly(self):
+        from backend.services.core_engine.pipeline import asset_discovery
+
+        scope = ScopeDefinition(
+            in_scope=[
+                {"asset_type": "domain", "value": "hosted.weblate.org"},
+                {"asset_type": "url", "value": "https://github.com/WeblateOrg/weblate"},
+            ],
+            out_of_scope=[{"asset_type": "domain", "value": "github.com"}],
+        )
+        ctx = self._base_ctx_with_scope(scope)
+        sf = ScopeFilter(scope)
+        config = self._stage1_config()
+        labels: list[str] = []
+
+        async def fake_run_tool_communicate(args, timeout, label, **kwargs):
+            tool = args[0]
+            labels.append(label)
+            if tool == "subfinder":
+                out_path = args[args.index("-o") + 1]
+                with open(out_path, "w", encoding="utf-8") as handle:
+                    handle.write("")
+                return "", ""
+            if tool == "dnsx":
+                return "", ""
+            if tool == "httpx":
+                if label == "httpx[explicit_scope]":
+                    return json.dumps(
+                        {"url": "https://hosted.weblate.org", "status_code": 200, "tech": []}
+                    ) + "\n", ""
+                return "", ""
+            if tool == "alterx":
+                return "", ""
+            raise AssertionError(f"Unexpected tool invocation: {tool}")
+
+        with patch(
+            "backend.services.core_engine.pipeline.asset_discovery.run_tool_communicate",
+            new=fake_run_tool_communicate,
+        ):
+            assets = await asset_discovery.run(ctx, sf, config)
+
+        assert [a.value for a in assets] == ["https://hosted.weblate.org"]
+        assert "httpx[explicit_scope]" in labels
 
     def test_non_web_scope_types_are_excluded_from_seed_domains(self):
         from backend.services.core_engine.pipeline import asset_discovery

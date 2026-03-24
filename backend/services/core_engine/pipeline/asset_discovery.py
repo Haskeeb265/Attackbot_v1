@@ -32,21 +32,31 @@ async def run(
     - Domain and wildcard_domain rules are always seed candidates.
     - URL rules are seed candidates only when HTTP(S) and domain-led by
       in-scope domain/wildcard rules.
+    - Explicit in-scope domain/url targets are also probed directly so
+      narrow scope entries are not lost when passive enumeration is sparse.
     """
     assets: list[DiscoveredAsset] = []
     errors: dict[str, str] = {}
     seed_domains, skipped_scope_counts = _extract_seed_domains(ctx.scope.in_scope, scope_filter)
+    explicit_targets, explicit_skipped_counts = _extract_explicit_web_targets(
+        ctx.scope.in_scope,
+        scope_filter,
+    )
 
-    if skipped_scope_counts:
+    combined_skipped_counts = dict(skipped_scope_counts)
+    for key, count in explicit_skipped_counts.items():
+        combined_skipped_counts[key] = combined_skipped_counts.get(key, 0) + count
+
+    if combined_skipped_counts:
         logger.info(
             "asset_discovery_seed_scope_skipped",
             scan_id=ctx.scan_id,
-            skipped_counts=skipped_scope_counts,
+            skipped_counts=combined_skipped_counts,
         )
 
-    if not seed_domains:
+    if not seed_domains and not explicit_targets:
         logger.warning(
-            "No web seed domains found in scope - skipping asset discovery",
+            "No web seed domains or explicit web targets found in scope - skipping asset discovery",
             scan_id=ctx.scan_id,
         )
         return assets
@@ -63,11 +73,24 @@ async def run(
             )
             errors[domain] = str(exc)
 
+    if explicit_targets:
+        try:
+            explicit_assets = await _probe_explicit_targets(explicit_targets, scope_filter, config)
+            assets.extend(explicit_assets)
+        except Exception as exc:
+            logger.warning(
+                "asset_discovery_explicit_probe_failed",
+                scan_id=ctx.scan_id,
+                error=str(exc),
+            )
+            errors["explicit_scope"] = str(exc)
+
     deduped_assets = _dedupe_assets_by_origin(assets)
     logger.info(
         "Stage 1 complete",
         scan_id=ctx.scan_id,
         seed_domains=len(seed_domains),
+        explicit_targets=len(explicit_targets),
         assets_found=len(deduped_assets),
         errors=len(errors),
     )
@@ -185,6 +208,43 @@ async def _discover_domain(
     finally:
         os.unlink(live_file)
 
+    return _httpx_entries_to_assets(httpx_stdout, scope_filter)
+
+
+async def _probe_explicit_targets(
+    targets: list[str],
+    scope_filter: ScopeFilter,
+    config,
+) -> list[DiscoveredAsset]:
+    unique_targets = sorted({str(target).strip() for target in targets if str(target).strip()})
+    if not unique_targets:
+        return []
+
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as tf:
+        tf.write("\n".join(unique_targets))
+        explicit_targets_file = tf.name
+    try:
+        httpx_stdout, _ = await run_tool_communicate(
+            args=[
+                "httpx",
+                "-l",
+                explicit_targets_file,
+                "-json",
+                "-silent",
+                "-tech-detect",
+                "-status-code",
+                "-title",
+            ],
+            timeout=_effective_timeout(config, int(getattr(config, "httpx_timeout", 600))),
+            label="httpx[explicit_scope]",
+        )
+    finally:
+        os.unlink(explicit_targets_file)
+
+    return _httpx_entries_to_assets(httpx_stdout, scope_filter)
+
+
+def _httpx_entries_to_assets(httpx_stdout: str, scope_filter: ScopeFilter) -> list[DiscoveredAsset]:
     found_assets: list[DiscoveredAsset] = []
     for entry in parse_jsonl(httpx_stdout):
         if entry.get("failed"):
@@ -251,6 +311,66 @@ def _extract_seed_domains(in_scope: list, scope_filter: ScopeFilter) -> tuple[li
         skipped_counts[key] = skipped_counts.get(key, 0) + 1
 
     return sorted(domains), skipped_counts
+
+
+def _extract_explicit_web_targets(
+    in_scope: list,
+    scope_filter: ScopeFilter,
+) -> tuple[list[str], dict[str, int]]:
+    targets: set[str] = set()
+    skipped_counts: dict[str, int] = {}
+
+    for rule in in_scope:
+        asset_type, raw_value = _coerce_scope_rule(rule)
+        if not raw_value:
+            skipped_counts["explicit_empty_value"] = skipped_counts.get("explicit_empty_value", 0) + 1
+            continue
+
+        if asset_type == "domain" or asset_type is None:
+            host = _normalize_seed_domain(raw_value)
+            if not host:
+                skipped_counts["explicit_invalid_domain_value"] = (
+                    skipped_counts.get("explicit_invalid_domain_value", 0) + 1
+                )
+                continue
+            if scope_filter.is_in_scope(host):
+                targets.add(host)
+            else:
+                skipped_counts["explicit_target_out_of_scope"] = (
+                    skipped_counts.get("explicit_target_out_of_scope", 0) + 1
+                )
+            continue
+
+        if asset_type == "url":
+            candidate = _normalize_explicit_url(raw_value)
+            if not candidate:
+                skipped_counts["explicit_non_http_url"] = (
+                    skipped_counts.get("explicit_non_http_url", 0) + 1
+                )
+                continue
+            if scope_filter.is_in_scope(candidate):
+                targets.add(candidate)
+            else:
+                skipped_counts["explicit_target_out_of_scope"] = (
+                    skipped_counts.get("explicit_target_out_of_scope", 0) + 1
+                )
+            continue
+
+        if asset_type == "wildcard_domain":
+            skipped_counts["explicit_wildcard_domain_skipped"] = (
+                skipped_counts.get("explicit_wildcard_domain_skipped", 0) + 1
+            )
+            continue
+
+        if asset_type in _NON_WEB_SCOPE_TYPES:
+            key = f"explicit_non_web_{asset_type}"
+            skipped_counts[key] = skipped_counts.get(key, 0) + 1
+            continue
+
+        key = f"explicit_unsupported_{asset_type or 'unknown'}"
+        skipped_counts[key] = skipped_counts.get(key, 0) + 1
+
+    return sorted(targets), skipped_counts
 
 
 def _dedupe_assets_by_origin(assets: list[DiscoveredAsset]) -> list[DiscoveredAsset]:
@@ -332,6 +452,18 @@ def _normalize_seed_domain(raw_value: str) -> str:
     if "." not in host and ":" not in host:
         return ""
     return host
+
+
+def _normalize_explicit_url(raw_value: str) -> str:
+    candidate = raw_value.strip()
+    if not candidate:
+        return ""
+    parsed = urlparse(candidate)
+    scheme = (parsed.scheme or "").lower()
+    host = (parsed.hostname or "").lower()
+    if scheme not in _HTTP_SCHEMES or not host:
+        return ""
+    return candidate
 
 
 def _extract_waf(httpx_entry: dict) -> str | None:

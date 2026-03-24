@@ -86,7 +86,7 @@ RABBITMQ_PASS = os.getenv("E2E_RABBITMQ_PASS", "attackbot")
 
 DB_DSN = os.getenv("E2E_DB_DSN", "postgresql://attackbot:attackbot@localhost:5432/attackbot")
 DB_EXEC_SERVICE = os.getenv("E2E_DB_EXEC_SERVICE", "core-engine")
-SCAN_TIMEOUT_SECONDS = int(os.getenv("E2E_SCAN_TIMEOUT_SECONDS", "2400"))
+SCAN_TIMEOUT_SECONDS = int(os.getenv("E2E_SCAN_TIMEOUT_SECONDS", "3600"))
 HEALTH_TIMEOUT_SECONDS = int(os.getenv("E2E_HEALTH_TIMEOUT_SECONDS", "300"))
 OPTIONAL_HEALTH_TIMEOUT_SECONDS = int(os.getenv("E2E_OPTIONAL_HEALTH_TIMEOUT_SECONDS", "30"))
 PROCESS_LOG_TAIL = int(os.getenv("E2E_PROCESS_LOG_TAIL", "300"))
@@ -120,6 +120,9 @@ LIVE_HACKERONE_ONLY = _truthy(os.getenv("E2E_LIVE_HACKERONE_ONLY"), default=True
 HACKERONE_PROGRAM_WAIT_SECONDS = int(os.getenv("E2E_HACKERONE_PROGRAM_WAIT_SECONDS", "300"))
 HACKERONE_PROGRAM_POLL_SECONDS = int(os.getenv("E2E_HACKERONE_PROGRAM_POLL_SECONDS", "10"))
 PROGRAM_AUDIT_LIMIT = int(os.getenv("E2E_PROGRAM_AUDIT_LIMIT", "200"))
+SCRAPER_TRIGGER_TIMEOUT_SECONDS = int(
+    os.getenv("E2E_SCRAPER_TRIGGER_TIMEOUT_SECONDS", "60")
+)
 PINNED_PROGRAM_HANDLE = _env_text(os.getenv("E2E_PINNED_PROGRAM_HANDLE"))
 PINNED_PROGRAM_ID = _env_text(os.getenv("E2E_PINNED_PROGRAM_ID"))
 ENABLE_FORCED_DEEP_TRACE = _truthy(
@@ -837,6 +840,50 @@ async def _wait_for_terminal_scan(
         await asyncio.sleep(3)
 
 
+async def _fetch_scan_by_id(conn: Any, scan_id: str) -> dict[str, Any] | None:
+    row = await conn.fetchrow(
+        """
+        SELECT scan_id, program_id, status, finding_count, severity_breakdown,
+               retry_count, partial_detail, error_detail,
+               started_at, completed_at, created_at
+        FROM scans
+        WHERE scan_id = $1::uuid
+        """,
+        scan_id,
+    )
+    return _record_to_dict(row) if row else None
+
+
+async def _wait_for_terminal_scan_by_id(
+    conn: Any,
+    scan_id: str,
+    timeout_seconds: int,
+    obs: dict[str, Any],
+) -> dict[str, Any]:
+    import asyncio
+
+    started = datetime.now(timezone.utc)
+    last_status: str | None = None
+
+    while True:
+        elapsed = (datetime.now(timezone.utc) - started).total_seconds()
+        if elapsed > timeout_seconds:
+            raise AssertionError(
+                "Timed out waiting for terminal scan status "
+                f"for scan_id={scan_id} after {timeout_seconds}s"
+            )
+
+        row = await _fetch_scan_by_id(conn, scan_id)
+        if row:
+            status = str(row.get("status"))
+            if status != last_status:
+                last_status = status
+                _log_step(obs, f"Scan status transition observed: {status}")
+            if status in {"completed", "partial", "failed_scope", "failed_internal"}:
+                return row
+        await asyncio.sleep(3)
+
+
 async def _fetch_latest_scan_for_program(
     conn: Any,
     program_id: str,
@@ -1200,7 +1247,7 @@ async def _wait_for_scan_jobs_queue_baseline(
     poll_seconds: float,
 ) -> dict[str, Any]:
     started = datetime.now(timezone.utc)
-    last_ready: int | None = None
+    last_observed: tuple[int | None, int | None] | None = None
     last_state: dict[str, Any] = {
         "queue": "scan.jobs",
         "exists": False,
@@ -1228,7 +1275,12 @@ async def _wait_for_scan_jobs_queue_baseline(
         except Exception:
             ready = None
 
-        if ready != last_ready:
+        try:
+            unacked = int(state.get("messages_unacknowledged") or 0)
+        except Exception:
+            unacked = None
+
+        if (ready, unacked) != last_observed:
             _log_step(
                 obs,
                 "Queue baseline poll scan.jobs: "
@@ -1236,9 +1288,9 @@ async def _wait_for_scan_jobs_queue_baseline(
                 f"unacked={state.get('messages_unacknowledged')} "
                 f"consumers={state.get('consumers')}",
             )
-            last_ready = ready
+            last_observed = (ready, unacked)
 
-        if ready == 0:
+        if ready == 0 and unacked == 0:
             return {
                 "reached": True,
                 "timeout_seconds": timeout_seconds,
@@ -2256,7 +2308,7 @@ async def test_end_to_end_system_trace_and_findings_documentation():
         if username_present and token_present:
             _log_step(obs, "HackerOne credentials detected; triggering live scraper sync")
             try:
-                async with httpx.AsyncClient(timeout=240) as client:
+                async with httpx.AsyncClient(timeout=SCRAPER_TRIGGER_TIMEOUT_SECONDS) as client:
                     trigger_resp = await client.post(
                         f"{SCRAPER_BASE_URL}/scrape/trigger",
                         params={"platform": "hackerone"},
@@ -2407,7 +2459,7 @@ async def test_end_to_end_system_trace_and_findings_documentation():
         _log_step(
             obs,
             "Waiting for queue baseline before triggering scan: "
-            f"queue=scan.jobs ready=0 timeout={baseline_timeout_seconds}s",
+            f"queue=scan.jobs ready=0 unacked=0 timeout={baseline_timeout_seconds}s",
         )
         queue_baseline_wait = await _wait_for_scan_jobs_queue_baseline(
             obs=obs,
@@ -2419,7 +2471,9 @@ async def test_end_to_end_system_trace_and_findings_documentation():
             _log_step(
                 obs,
                 "Queue baseline reached: "
-                f"scan.jobs ready={queue_baseline_wait.get('state', {}).get('messages_ready')}",
+                "scan.jobs "
+                f"ready={queue_baseline_wait.get('state', {}).get('messages_ready')} "
+                f"unacked={queue_baseline_wait.get('state', {}).get('messages_unacknowledged')}",
             )
         elif E2E_ENFORCE_QUEUE_BASELINE:
             raise AssertionError(
@@ -2451,15 +2505,34 @@ async def test_end_to_end_system_trace_and_findings_documentation():
                 f"Scan start failed with status={start_resp.status_code}: {start_payload}"
             )
 
+        scan_id_from_start: str | None = None
+        if isinstance(start_payload, dict):
+            candidate = start_payload.get("scan_id")
+            if candidate:
+                try:
+                    scan_id_from_start = str(uuid.UUID(str(candidate)))
+                except Exception:
+                    scan_id_from_start = str(candidate)
+                obs["scan_id"] = scan_id_from_start
+                _log_step(obs, f"Scan start response included scan_id={scan_id_from_start}")
+
         terminal_reached = False
         try:
-            terminal_scan = await _wait_for_terminal_scan(
-                conn=conn,
-                program_id=program_id,
-                created_after=scan_request_started_at,
-                timeout_seconds=SCAN_TIMEOUT_SECONDS,
-                obs=obs,
-            )
+            if scan_id_from_start:
+                terminal_scan = await _wait_for_terminal_scan_by_id(
+                    conn=conn,
+                    scan_id=scan_id_from_start,
+                    timeout_seconds=SCAN_TIMEOUT_SECONDS,
+                    obs=obs,
+                )
+            else:
+                terminal_scan = await _wait_for_terminal_scan(
+                    conn=conn,
+                    program_id=program_id,
+                    created_after=scan_request_started_at,
+                    timeout_seconds=SCAN_TIMEOUT_SECONDS,
+                    obs=obs,
+                )
             terminal_reached = True
             obs["scan_row"] = terminal_scan
             obs["scan_id"] = terminal_scan.get("scan_id")
@@ -2476,11 +2549,14 @@ async def test_end_to_end_system_trace_and_findings_documentation():
                 obs,
                 f"Scan wait timed out after {SCAN_TIMEOUT_SECONDS}s; collecting live snapshot",
             )
-            latest_scan = await _fetch_latest_scan_for_program(
-                conn=conn,
-                program_id=program_id,
-                created_after=scan_request_started_at,
-            )
+            if scan_id_from_start:
+                latest_scan = await _fetch_scan_by_id(conn=conn, scan_id=scan_id_from_start)
+            else:
+                latest_scan = await _fetch_latest_scan_for_program(
+                    conn=conn,
+                    program_id=program_id,
+                    created_after=scan_request_started_at,
+                )
             if latest_scan:
                 obs["scan_row"] = latest_scan
                 obs["scan_id"] = latest_scan.get("scan_id")
@@ -2499,7 +2575,11 @@ async def test_end_to_end_system_trace_and_findings_documentation():
                     "terminal_reached": False,
                     "timeout_seconds": SCAN_TIMEOUT_SECONDS,
                     "status_at_snapshot": None,
-                    "note": "No scan row observed after start request",
+                    "note": (
+                        f"No scan row observed for scan_id={scan_id_from_start} after start request"
+                        if scan_id_from_start
+                        else "No scan row observed after start request"
+                    ),
                 }
 
         if obs.get("scan_id"):

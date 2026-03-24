@@ -7,6 +7,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 
 from backend.services.core_engine.config import EngineConfig
+from backend.services.core_engine.repository import ScanRepository
 from backend.services.core_engine.startup_checks import (
     collect_toolchain_checks,
     startup_checks_ok,
@@ -126,6 +127,19 @@ async def _build_payload_from_scraper(
         feature_flags=flags,
         priority=priority,
     )
+
+
+async def _reserve_scan_id(payload: ScanJobsPayload) -> str:
+    """
+    Reserve the scan row before queueing so callers can correlate on scan_id.
+    """
+    async with get_session() as session:
+        repo = ScanRepository(session)
+        return await repo.create_or_resume_scan(
+            program_id=str(payload.program_id),
+            feature_flags=payload.feature_flags.model_dump(mode="python"),
+            priority=payload.priority,
+        )
 
 
 def _enqueue_scan(payload: ScanJobsPayload) -> None:
@@ -301,8 +315,15 @@ async def start_scan(body: dict) -> JSONResponse:
         )
     else:
         payload = ScanJobsPayload(**body)
+    scan_id = await _reserve_scan_id(payload)
     _enqueue_scan(payload)
-    return JSONResponse({"status": "queued", "program_id": str(payload.program_id)})
+    return JSONResponse(
+        {
+            "status": "queued",
+            "program_id": str(payload.program_id),
+            "scan_id": scan_id,
+        }
+    )
 
 
 @app.get("/api/v1/scans")
