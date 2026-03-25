@@ -29,6 +29,7 @@ RUN nuclei -update-templates || true
 RUN mkdir -p /wordlists && \
     wget -q https://raw.githubusercontent.com/danielmiessler/SecLists/master/Discovery/Web-Content/common.txt \
     -O /wordlists/common.txt
+COPY wordlists/e2e_tiny.txt /wordlists/e2e_tiny.txt
 
 COPY backend/shared /app/backend/shared
 COPY backend/__init__.py /app/backend/__init__.py

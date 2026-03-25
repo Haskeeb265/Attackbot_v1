@@ -1,3 +1,4 @@
+import asyncio
 import hashlib
 import json
 import os
@@ -87,11 +88,12 @@ async def _enumerate_asset(
     out_endpoints: list[DiscoveredEndpoint] = []
     out_js_assets: list[DiscoveredJsAsset] = []
 
-    # 1) ffuf
-    out_endpoints.extend(await _run_ffuf(asset, base_url, config))
-
-    # 2) waybackurls
-    out_endpoints.extend(await _run_waybackurls(asset, base_url, scope_filter, config))
+    ffuf_endpoints, wayback_endpoints = await asyncio.gather(
+        _run_ffuf(asset, base_url, config),
+        _run_waybackurls(asset, base_url, scope_filter, config),
+    )
+    out_endpoints.extend(ffuf_endpoints)
+    out_endpoints.extend(wayback_endpoints)
 
     # 3) JS discovery + download/upload (best-effort)
     js_urls = [
@@ -127,7 +129,10 @@ async def _run_ffuf(
     if asset.asset_id is None:
         return []
 
-    wordlist = getattr(config, "ffuf_wordlist", "/wordlists/common.txt")
+    wordlist = (
+        os.getenv("E2E_FFUF_WORDLIST")
+        or getattr(config, "ffuf_wordlist", "/wordlists/common.txt")
+    )
     timeout = _effective_timeout(config, int(getattr(config, "ffuf_timeout", 600)))
 
     with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as tf:
@@ -200,6 +205,10 @@ async def _run_waybackurls(
     parsed = urlparse(base_url)
     domain = parsed.hostname or ""
     if not domain:
+        return []
+
+    if os.getenv("E2E_SKIP_WAYBACKURLS", "").strip().lower() in {"1", "true", "yes"}:
+        logger.info("waybackurls skipped via E2E flag", domain=domain)
         return []
 
     timeout = _effective_timeout(config, int(getattr(config, "waybackurls_timeout", 300)))

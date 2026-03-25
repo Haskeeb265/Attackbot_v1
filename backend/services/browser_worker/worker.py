@@ -1,10 +1,9 @@
 # backend/services/browser_worker/worker.py
 from celery import Celery
-from kombu import Queue
 
 from backend.shared.config import BaseServiceConfig
 from backend.shared.logging import configure_logging, get_logger
-from backend.shared.queue import Queues, dead_letter_arguments
+from backend.shared.queue import Queues, passive_queue_binding
 
 
 class WorkerConfig(BaseServiceConfig):
@@ -31,11 +30,7 @@ app.conf.update(
     broker_connection_retry_on_startup=True,
     task_default_queue=Queues.BROWSER_JOBS,
     task_queues=(
-        Queue(
-            Queues.BROWSER_JOBS,
-            durable=True,
-            queue_arguments=dead_letter_arguments(Queues.BROWSER_JOBS),
-        ),
+        passive_queue_binding(Queues.BROWSER_JOBS),
     ),
 )
 

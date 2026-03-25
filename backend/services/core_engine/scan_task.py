@@ -98,14 +98,14 @@ async def _async_scan_pipeline(payload: ScanJobsPayload | dict) -> None:
     program_id = str(payload.program_id)
     scan_id = None
 
-    # Redis lock — one scan per program at a time
+    # Redis lock: one scan per program at a time.
     redis = aioredis.from_url(config.redis_url)
     lock_key = f"scan:lock:{program_id}"
 
     lock = redis.lock(lock_key, timeout=config.scan_lock_ttl_seconds, blocking=False)
     acquired = await lock.acquire()
     if not acquired:
-        logger.warning("Scan lock held — skipping", program_id=program_id, lock_key=lock_key)
+        logger.warning("Scan lock held - skipping", program_id=program_id, lock_key=lock_key)
         return
     try:
         async with get_session() as session:
@@ -120,12 +120,15 @@ async def _async_scan_pipeline(payload: ScanJobsPayload | dict) -> None:
                 priority=payload.priority,
             )
 
-            # Fetch scope from Scraper API (authoritative)
+            # Fetch scope from Scraper API (authoritative).
             try:
                 shared_scope = await _fetch_scope_from_scraper(program_id, config)
             except ScanError as e:
-                logger.error("Scope resolution failed",
-                             program_id=program_id, error=str(e))
+                logger.error(
+                    "Scope resolution failed",
+                    program_id=program_id,
+                    error=str(e),
+                )
                 await repo.mark_scan_complete(
                     scan_id=scan_id,
                     status="failed_scope",
@@ -150,8 +153,7 @@ async def _async_scan_pipeline(payload: ScanJobsPayload | dict) -> None:
                 await publisher.connect()
                 await _execute_pipeline(ctx, scan_result, repo, publisher, config)
             except Exception as e:
-                logger.error("Pipeline fatal error",
-                             scan_id=scan_id, error=str(e))
+                logger.error("Pipeline fatal error", scan_id=scan_id, error=str(e))
                 await repo.mark_scan_complete(
                     scan_id=scan_id,
                     status="failed_internal",
@@ -178,12 +180,16 @@ async def _execute_pipeline(
     config: "EngineConfig",
 ) -> None:
     """
-    Ordered pipeline execution. Stages 4 and 5 run in parallel.
-    Stage failures are non-fatal unless Stage 0 (scope) or Stage 10 (aggregation) fail.
+    Ordered pipeline execution.
+    After Stage 2, enumeration (Stage 3) and nuclei (Stage 4) run in parallel.
+    After enumeration completes, web tests (Stage 5) and JS secrets (Stage 6)
+    run in parallel using the endpoints and JS assets discovered by Stage 3.
+    Stage failures are non-fatal unless Stage 0 (scope) or Stage 10
+    (aggregation) fail.
     """
     scan_id = ctx.scan_id
 
-    # ── Stage 0: Scope Filter (FATAL) ───────────────────────────────────
+    # Stage 0: Scope Filter (FATAL)
     logger.info("Stage 0: Scope filter", scan_id=scan_id)
     try:
         scope_filter = ScopeFilter(ctx.scope)  # raises ScanError if scope empty
@@ -198,106 +204,180 @@ async def _execute_pipeline(
         )
         return
 
-    # ── Stage 1: Asset Discovery ─────────────────────────────────────────
+    # Stage 1: Asset Discovery
     s1_start = datetime.now(timezone.utc)
     try:
         assets = await asset_discovery.run(ctx, scope_filter, config)
         scan_result.assets = assets
         await repo.save_assets(scan_id, assets)
-        await repo.record_stage(scan_id, 1.0, "asset_discovery", "completed",
-                                s1_start, {"assets_found": len(assets)})
+        await repo.record_stage(
+            scan_id,
+            1.0,
+            "asset_discovery",
+            "completed",
+            s1_start,
+            {"assets_found": len(assets)},
+        )
     except Exception as e:
         scan_result.stage_errors["asset_discovery"] = str(e)
-        await repo.record_stage(scan_id, 1.0, "asset_discovery", "failed",
-                                s1_start, error_detail=str(e))
-        logger.warning("Stage 1 failed — continuing", scan_id=scan_id, error=str(e))
+        await repo.record_stage(
+            scan_id,
+            1.0,
+            "asset_discovery",
+            "failed",
+            s1_start,
+            error_detail=str(e),
+        )
+        logger.warning("Stage 1 failed - continuing", scan_id=scan_id, error=str(e))
 
     if not scan_result.assets:
-        logger.warning("No assets found — skipping Stages 2–6", scan_id=scan_id)
+        logger.warning("No assets found - skipping Stages 2-6", scan_id=scan_id)
         await aggregator.run(ctx, scan_result, repo, publisher)
         return
 
-    # ── Stage 2: Fingerprinting ─────────────────────────────────────────
+    # Stage 2: Fingerprinting
     s2_start = datetime.now(timezone.utc)
     try:
         scan_result.assets = await fingerprinting.run(ctx, scan_result.assets, config)
-        await repo.save_assets(scan_id, scan_result.assets)  # update with enrichment
+        await repo.save_assets(scan_id, scan_result.assets)
         await repo.record_stage(scan_id, 2.0, "fingerprinting", "completed", s2_start)
     except Exception as e:
         scan_result.stage_errors["fingerprinting"] = str(e)
-        await repo.record_stage(scan_id, 2.0, "fingerprinting", "failed",
-                                s2_start, error_detail=str(e))
-        logger.warning("Stage 2 failed — continuing", scan_id=scan_id, error=str(e))
-
-    # ── Stage 3: Enumeration ─────────────────────────────────────────────
-    s3_start = datetime.now(timezone.utc)
-    try:
-        endpoints, js_assets = await enumeration.run(
-            ctx, scan_result.assets, scope_filter, config
+        await repo.record_stage(
+            scan_id,
+            2.0,
+            "fingerprinting",
+            "failed",
+            s2_start,
+            error_detail=str(e),
         )
+        logger.warning("Stage 2 failed - continuing", scan_id=scan_id, error=str(e))
+
+    # Stages 3 + 4: launch in parallel after fingerprinting.
+    s3_start = datetime.now(timezone.utc)
+    s4_start = datetime.now(timezone.utc)
+
+    async def _noop_findings() -> list:
+        return []
+
+    enum_task = asyncio.create_task(
+        enumeration.run(ctx, scan_result.assets, scope_filter, config)
+    )
+    nuclei_task = asyncio.create_task(
+        nuclei_scan.run(ctx, scan_result.assets, scope_filter, config)
+        if ctx.feature_flags.nuclei
+        else _noop_findings()
+    )
+
+    try:
+        endpoints, js_assets = await enum_task
         scan_result.endpoints = endpoints
         scan_result.js_assets = js_assets
         await repo.save_endpoints(scan_id, endpoints)
         for js in js_assets:
             await repo.save_js_asset(scan_id, js)
         ctx.js_asset_ids = [str(j.js_asset_id) for j in js_assets if j.js_asset_id]
-        await repo.record_stage(scan_id, 3.0, "enumeration", "completed", s3_start,
-                                {"endpoints": len(endpoints), "js_assets": len(js_assets)})
+        await repo.record_stage(
+            scan_id,
+            3.0,
+            "enumeration",
+            "completed",
+            s3_start,
+            {"endpoints": len(endpoints), "js_assets": len(js_assets)},
+        )
     except Exception as e:
         scan_result.stage_errors["enumeration"] = str(e)
-        await repo.record_stage(scan_id, 3.0, "enumeration", "failed",
-                                s3_start, error_detail=str(e))
-        logger.warning("Stage 3 failed — continuing", scan_id=scan_id, error=str(e))
+        await repo.record_stage(
+            scan_id,
+            3.0,
+            "enumeration",
+            "failed",
+            s3_start,
+            error_detail=str(e),
+        )
+        logger.warning("Stage 3 failed - continuing", scan_id=scan_id, error=str(e))
 
-    # ── Stages 4 + 5: Parallel ───────────────────────────────────────────
-    s4_start = datetime.now(timezone.utc)
-    async def _noop_findings() -> list:
-        return []
-
-    nuclei_task = asyncio.create_task(
-        nuclei_scan.run(ctx, scan_result.assets, scope_filter, config)
-        if ctx.feature_flags.nuclei
-        else _noop_findings()
-    )
+    # Stages 5 + 6: launch in parallel once enumeration outputs exist.
+    s5_start = datetime.now(timezone.utc)
     max_web_endpoints = int(getattr(config, "web_vuln_max_endpoints", 500))
     web_endpoints = scan_result.endpoints[:max_web_endpoints]
     web_task = asyncio.create_task(
         web_vuln_tests.run(ctx, web_endpoints, scope_filter, ctx.feature_flags)
     )
-    nuclei_findings, web_findings = await asyncio.gather(
-        nuclei_task, web_task, return_exceptions=True
+
+    s6_start = datetime.now(timezone.utc)
+    js_task = asyncio.create_task(js_secrets.run(ctx, scan_result.js_assets))
+
+    nuclei_findings, web_findings, js_findings = await asyncio.gather(
+        nuclei_task,
+        web_task,
+        js_task,
+        return_exceptions=True,
     )
 
     if isinstance(nuclei_findings, Exception):
         scan_result.stage_errors["nuclei_scan"] = str(nuclei_findings)
-        await repo.record_stage(scan_id, 4.0, "nuclei_scan", "failed",
-                                s4_start, error_detail=str(nuclei_findings))
+        await repo.record_stage(
+            scan_id,
+            4.0,
+            "nuclei_scan",
+            "failed",
+            s4_start,
+            error_detail=str(nuclei_findings),
+        )
     else:
         scan_result.finding_candidates.extend(nuclei_findings)
-        await repo.record_stage(scan_id, 4.0, "nuclei_scan", "completed", s4_start,
-                                {"findings": len(nuclei_findings)})
+        await repo.record_stage(
+            scan_id,
+            4.0,
+            "nuclei_scan",
+            "completed",
+            s4_start,
+            {"findings": len(nuclei_findings)},
+        )
 
     if isinstance(web_findings, Exception):
         scan_result.stage_errors["web_vuln_tests"] = str(web_findings)
-        await repo.record_stage(scan_id, 5.0, "web_vuln_tests", "failed",
-                                s4_start, error_detail=str(web_findings))
+        await repo.record_stage(
+            scan_id,
+            5.0,
+            "web_vuln_tests",
+            "failed",
+            s5_start,
+            error_detail=str(web_findings),
+        )
     else:
         scan_result.finding_candidates.extend(web_findings)
-        await repo.record_stage(scan_id, 5.0, "web_vuln_tests", "completed", s4_start,
-                                {"findings": len(web_findings)})
+        await repo.record_stage(
+            scan_id,
+            5.0,
+            "web_vuln_tests",
+            "completed",
+            s5_start,
+            {"findings": len(web_findings)},
+        )
 
-    # ── Stage 6: JS Secrets ──────────────────────────────────────────────
-    s6_start = datetime.now(timezone.utc)
-    try:
-        js_findings = await js_secrets.run(ctx, scan_result.js_assets)
+    if isinstance(js_findings, Exception):
+        scan_result.stage_errors["js_secrets"] = str(js_findings)
+        await repo.record_stage(
+            scan_id,
+            6.0,
+            "js_secrets",
+            "failed",
+            s6_start,
+            error_detail=str(js_findings),
+        )
+        logger.warning("Stage 6 failed - continuing", scan_id=scan_id, error=str(js_findings))
+    else:
         scan_result.finding_candidates.extend(js_findings)
-        await repo.record_stage(scan_id, 6.0, "js_secrets", "completed", s6_start,
-                                {"findings": len(js_findings)})
-    except Exception as e:
-        scan_result.stage_errors["js_secrets"] = str(e)
-        await repo.record_stage(scan_id, 6.0, "js_secrets", "failed",
-                                s6_start, error_detail=str(e))
-        logger.warning("Stage 6 failed — continuing", scan_id=scan_id, error=str(e))
+        await repo.record_stage(
+            scan_id,
+            6.0,
+            "js_secrets",
+            "completed",
+            s6_start,
+            {"findings": len(js_findings)},
+        )
 
-    # ── Stage 10: Aggregation (FATAL if fails) ──────────────────────────
+    # Stage 10: Aggregation (FATAL if fails)
     await aggregator.run(ctx, scan_result, repo, publisher)

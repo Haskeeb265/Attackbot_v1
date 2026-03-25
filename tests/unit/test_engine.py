@@ -4,6 +4,7 @@ All subprocess calls are mocked — no real tools required.
 All DB calls are mocked — no real database required.
 """
 
+import asyncio
 import hashlib
 import json
 import os
@@ -516,6 +517,82 @@ class TestEnumeration:
         assert any(e.path == "/.git/HEAD" and e.response_code == 200 for e in eps)
         assert js == []
 
+    @pytest.mark.asyncio
+    async def test_stage3_uses_e2e_ffuf_wordlist_override(self):
+        from backend.services.core_engine.pipeline import enumeration
+        from backend.services.core_engine.pipeline.context import ScanContext, FeatureFlags, ScopeDefinition
+        from backend.services.core_engine.pipeline.scope_filter import ScopeFilter
+        from backend.services.core_engine.models import DiscoveredAsset
+
+        ctx = ScanContext(
+            scan_id=str(uuid.uuid4()),
+            program_id=str(uuid.uuid4()),
+            scope=ScopeDefinition(in_scope=[{"asset_type": "domain", "value": "example.com"}], out_of_scope=[]),
+            feature_flags=FeatureFlags(),
+        )
+        sf = ScopeFilter(ctx.scope)
+        asset = DiscoveredAsset(asset_type="url", value="https://example.com", asset_id=uuid.uuid4())
+        config = MagicMock()
+        config.ffuf_timeout = 5
+        config.ffuf_wordlist = "/wordlists/common.txt"
+
+        async def fake_tool(args, timeout, label, **kwargs):
+            if args[0] == "ffuf":
+                assert args[args.index("-w") + 1] == "/wordlists/e2e_tiny.txt"
+                out_path = args[args.index("-o") + 1]
+                with open(out_path, "w", encoding="utf-8") as f:
+                    f.write(json.dumps({"results": []}))
+                return "", ""
+            if args[0] == "waybackurls":
+                raise FileNotFoundError()
+            raise AssertionError(args[0])
+
+        with patch.dict(os.environ, {"E2E_FFUF_WORDLIST": "/wordlists/e2e_tiny.txt"}, clear=False):
+            with patch("backend.services.core_engine.pipeline.enumeration.run_tool_communicate", new=fake_tool):
+                eps, js = await enumeration.run(ctx, [asset], sf, config)
+
+        assert eps == []
+        assert js == []
+
+    @pytest.mark.asyncio
+    async def test_stage3_skips_waybackurls_when_e2e_flag_set(self):
+        from backend.services.core_engine.pipeline import enumeration
+        from backend.services.core_engine.pipeline.context import ScanContext, FeatureFlags, ScopeDefinition
+        from backend.services.core_engine.pipeline.scope_filter import ScopeFilter
+        from backend.services.core_engine.models import DiscoveredAsset
+
+        ctx = ScanContext(
+            scan_id=str(uuid.uuid4()),
+            program_id=str(uuid.uuid4()),
+            scope=ScopeDefinition(in_scope=[{"asset_type": "domain", "value": "example.com"}], out_of_scope=[]),
+            feature_flags=FeatureFlags(),
+        )
+        sf = ScopeFilter(ctx.scope)
+        asset = DiscoveredAsset(asset_type="url", value="https://example.com", asset_id=uuid.uuid4())
+        config = MagicMock()
+        config.ffuf_timeout = 5
+        config.ffuf_wordlist = "/wordlists/common.txt"
+        calls = []
+
+        async def fake_tool(args, timeout, label, **kwargs):
+            calls.append(args[0])
+            if args[0] == "ffuf":
+                out_path = args[args.index("-o") + 1]
+                with open(out_path, "w", encoding="utf-8") as f:
+                    f.write(json.dumps({"results": []}))
+                return "", ""
+            if args[0] == "waybackurls":
+                raise AssertionError("waybackurls should have been skipped")
+            raise AssertionError(args[0])
+
+        with patch.dict(os.environ, {"E2E_SKIP_WAYBACKURLS": "true"}, clear=False):
+            with patch("backend.services.core_engine.pipeline.enumeration.run_tool_communicate", new=fake_tool):
+                eps, js = await enumeration.run(ctx, [asset], sf, config)
+
+        assert calls == ["ffuf"]
+        assert eps == []
+        assert js == []
+
 
 # ── Passive sensitive path findings (Stage 5 helper) ───────────────────────
 
@@ -711,6 +788,69 @@ class TestScanTaskPipeline:
         assert repo.save_assets.called
         assert repo.save_endpoints.called
 
+    @pytest.mark.asyncio
+    async def test_execute_pipeline_runs_parallel_dependent_stages(self):
+        from backend.services.core_engine.scan_task import _execute_pipeline
+        from backend.services.core_engine.pipeline.context import ScanContext, FeatureFlags, ScopeDefinition
+        from backend.services.core_engine.models import ScanResult, DiscoveredAsset, DiscoveredEndpoint
+
+        ctx = ScanContext(
+            scan_id=str(uuid.uuid4()),
+            program_id=str(uuid.uuid4()),
+            scope=ScopeDefinition(in_scope=[{"asset_type": "domain", "value": "example.com"}], out_of_scope=[]),
+            feature_flags=FeatureFlags(nuclei=True),
+        )
+        scan_result = ScanResult()
+        repo = AsyncMock()
+        publisher = AsyncMock()
+        config = MagicMock()
+        config.httpx_timeout = 5
+        config.web_vuln_max_endpoints = 500
+
+        fake_assets = [DiscoveredAsset(asset_type="url", value="https://example.com")]
+        fake_assets[0].asset_id = uuid.uuid4()
+        fake_endpoints = [
+            DiscoveredEndpoint(
+                asset_id=fake_assets[0].asset_id,
+                method="GET",
+                path="/health",
+                full_url="https://example.com/health",
+                response_code=200,
+            )
+        ]
+        nuclei_started = asyncio.Event()
+        js_stage_started = asyncio.Event()
+
+        async def fake_enumeration(*args, **kwargs):
+            await asyncio.sleep(0)
+            assert nuclei_started.is_set()
+            return fake_endpoints, []
+
+        async def fake_nuclei(*args, **kwargs):
+            nuclei_started.set()
+            return []
+
+        async def fake_web(*args, **kwargs):
+            await asyncio.sleep(0)
+            assert js_stage_started.is_set()
+            return []
+
+        async def fake_js(*args, **kwargs):
+            js_stage_started.set()
+            return []
+
+        with patch("backend.services.core_engine.scan_task.asset_discovery.run", new=AsyncMock(return_value=fake_assets)), \
+             patch("backend.services.core_engine.scan_task.fingerprinting.run", new=AsyncMock(return_value=fake_assets)), \
+             patch("backend.services.core_engine.scan_task.enumeration.run", new=fake_enumeration), \
+             patch("backend.services.core_engine.scan_task.web_vuln_tests.run", new=fake_web), \
+             patch("backend.services.core_engine.scan_task.nuclei_scan.run", new=fake_nuclei), \
+             patch("backend.services.core_engine.scan_task.js_secrets.run", new=fake_js), \
+             patch("backend.services.core_engine.scan_task.aggregator.run", new=AsyncMock(return_value={})):
+            await _execute_pipeline(ctx, scan_result, repo, publisher, config)
+
+        assert scan_result.stage_errors == {}
+        assert repo.save_endpoints.called
+
 
 # ── Import smoke tests (cover main/worker/config) ───────────────────────────
 
@@ -897,18 +1037,24 @@ class TestNucleiScan:
         config = MagicMock()
         config.nuclei_timeout = 5
         config.nuclei_rate_limit = 10
+        config.nuclei_bulk_size = 10
         config.nuclei_concurrency = 2
         config.nuclei_templates = ""
 
         assets = [DiscoveredAsset(asset_type="url", value="https://example.com", asset_id=uuid.uuid4())]
+        captured_args = []
 
         async def fake_nuclei(args, timeout, label, **kwargs):
+            captured_args.append(args)
             # one nuclei JSON line
             return json.dumps({"matched-at": "https://example.com/.git/HEAD", "info": {"name": "Test", "severity": "high"}}) + "\n", ""
 
         with patch("backend.services.core_engine.pipeline.nuclei_scan.run_tool_communicate", new=fake_nuclei):
             findings = await nuclei_scan.run(ctx, assets, sf, config)
 
+        assert captured_args
+        assert "-jsonl" in captured_args[0]
+        assert "-json" not in captured_args[0]
         assert len(findings) == 1
         assert findings[0].severity in {"high", "critical", "medium", "low", "info"}
 

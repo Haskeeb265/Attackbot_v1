@@ -5,6 +5,7 @@ from typing import Any, Iterable
 
 import aio_pika
 import aio_pika.abc
+from kombu import Queue as KombuQueue
 
 from backend.shared.exceptions import QueueConnectionError
 from backend.shared.logging import get_logger
@@ -78,6 +79,18 @@ def dead_letter_arguments(queue_name: str) -> dict[str, str] | None:
         "x-dead-letter-exchange": "",
         "x-dead-letter-routing-key": spec.dlq_name,
     }
+
+
+def passive_queue_binding(queue_name: str) -> KombuQueue:
+    """
+    Return a durable Kombu queue bound to existing broker state without redeclare.
+
+    Queue topology is created elsewhere in the stack. In this Kombu version,
+    ``passive=True`` is not preserved on Queue instances, so ``no_declare=True``
+    is the reliable way to avoid 406 PRECONDITION_FAILED errors when consumers
+    encounter queues that were already created with persisted arguments.
+    """
+    return KombuQueue(queue_name, durable=True, no_declare=True)
 
 
 def _resolve_queue_specs(queue_names: Iterable[str] | None = None) -> list[QueueSpec]:

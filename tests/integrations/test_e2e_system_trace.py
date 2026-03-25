@@ -6,10 +6,10 @@ This test:
 2) Enables every scan feature flag currently accepted by scan.jobs schema.
 3) Triggers a real scan through Core Engine.
 4) Collects process, API, DB, queue, and worker evidence.
-5) Writes a root-level markdown report with all observations.
+5) Writes a numbered markdown report with all observations directly into E2E_Runs.
 
 Report output:
-    E2E_SYSTEM_FINDINGS.md
+    E2E_Runs/E2E_SYSTEM_FINDINGS#<next>.md
 """
 
 from __future__ import annotations
@@ -31,7 +31,24 @@ ROOT_DIR = Path(__file__).resolve().parents[2]
 COMPOSE_FILE = ROOT_DIR / "infra" / "docker-compose.yml"
 ENV_FILE = ROOT_DIR / ".env"
 ENV_EXAMPLE_FILE = ROOT_DIR / ".env.example"
-REPORT_PATH = ROOT_DIR / "E2E_SYSTEM_FINDINGS.md"
+REPORTS_DIR = ROOT_DIR / "E2E_Runs"
+REPORT_BASENAME = "E2E_SYSTEM_FINDINGS"
+
+
+def _next_report_path() -> Path:
+    REPORTS_DIR.mkdir(parents=True, exist_ok=True)
+
+    next_index = 1
+    prefix = f"{REPORT_BASENAME}#"
+    for candidate in REPORTS_DIR.glob(f"{prefix}*.md"):
+        suffix = candidate.stem.removeprefix(prefix)
+        if suffix.isdigit():
+            next_index = max(next_index, int(suffix) + 1)
+
+    return REPORTS_DIR / f"{prefix}{next_index}.md"
+
+
+REPORT_PATH = _next_report_path()
 
 
 def _truthy(value: str | None, default: bool = False) -> bool:
@@ -584,16 +601,77 @@ async def _list_program_inventory(conn: Any, limit: int = 200) -> list[dict[str,
 
     inventory: list[dict[str, Any]] = []
     for row in rows:
-        data = _record_to_dict(row)
-        data["program_id"] = str(data.get("program_id"))
-        data["handle"] = str(data.get("handle") or "")
-        data["platform"] = str(data.get("platform") or "")
-        data["name"] = str(data.get("name") or "")
-        data["in_scope_count"] = int(data.get("in_scope_count") or 0)
-        data["valid_in_scope_count"] = int(data.get("valid_in_scope_count") or 0)
-        data["out_of_scope_count"] = int(data.get("out_of_scope_count") or 0)
-        inventory.append(data)
+        inventory.append(_normalize_program_inventory_row(_record_to_dict(row)))
     return inventory
+
+
+def _normalize_program_inventory_row(data: dict[str, Any]) -> dict[str, Any]:
+    normalized = dict(data)
+    normalized["program_id"] = str(normalized.get("program_id"))
+    normalized["handle"] = str(normalized.get("handle") or "")
+    normalized["platform"] = str(normalized.get("platform") or "")
+    normalized["name"] = str(normalized.get("name") or "")
+    normalized["in_scope_count"] = int(normalized.get("in_scope_count") or 0)
+    normalized["valid_in_scope_count"] = int(normalized.get("valid_in_scope_count") or 0)
+    normalized["out_of_scope_count"] = int(normalized.get("out_of_scope_count") or 0)
+    return normalized
+
+
+async def _fetch_pinned_program_inventory_row(conn: Any) -> dict[str, Any] | None:
+    pinned_id = str(PINNED_PROGRAM_ID or "").strip()
+    pinned_handle = str(PINNED_PROGRAM_HANDLE or "").strip().lower()
+    if not pinned_id and not pinned_handle:
+        return None
+
+    row = await conn.fetchrow(
+        """
+        SELECT
+            p.program_id,
+            p.handle,
+            p.name,
+            p.platform,
+            p.is_active,
+            p.updated_at,
+            p.created_at,
+            COUNT(*) FILTER (
+                WHERE s.scope_type = 'in_scope'
+            )::int AS in_scope_count,
+            COUNT(*) FILTER (
+                WHERE s.scope_type = 'in_scope'
+                  AND COALESCE(TRIM(s.value), '') <> ''
+            )::int AS valid_in_scope_count,
+            COUNT(*) FILTER (
+                WHERE s.scope_type = 'out_of_scope'
+            )::int AS out_of_scope_count
+        FROM programs p
+        LEFT JOIN program_scopes s ON s.program_id = p.program_id
+        WHERE ($1::text = '' OR p.program_id::text = $1::text)
+          AND ($2::text = '' OR LOWER(COALESCE(p.handle, '')) = $2::text)
+        GROUP BY
+            p.program_id, p.handle, p.name, p.platform, p.is_active, p.updated_at, p.created_at
+        ORDER BY p.updated_at DESC NULLS LAST, p.created_at DESC
+        LIMIT 1
+        """,
+        pinned_id,
+        pinned_handle,
+    )
+    if not row:
+        return None
+    return _normalize_program_inventory_row(_record_to_dict(row))
+
+
+def _prepend_program_to_inventory_if_missing(
+    inventory: list[dict[str, Any]],
+    program: dict[str, Any] | None,
+) -> list[dict[str, Any]]:
+    if not program:
+        return inventory
+
+    program_id = str(program.get("program_id"))
+    for existing in inventory:
+        if str(existing.get("program_id")) == program_id:
+            return inventory
+    return [program, *inventory]
 
 
 def _is_hackerone_eligible(program: dict[str, Any]) -> bool:
@@ -714,9 +792,15 @@ async def _select_live_hackerone_program(
         inventory = await _list_program_inventory(conn, PROGRAM_AUDIT_LIMIT)
         pinned_selected, pinned_policy = _find_program_by_pinned_selector(inventory)
         if pinned_policy is not None:
+            if pinned_selected is None:
+                pinned_selected = await _fetch_pinned_program_inventory_row(conn)
+            audit_inventory = _prepend_program_to_inventory_if_missing(
+                inventory,
+                pinned_selected,
+            )
             selected_id = str(pinned_selected["program_id"]) if pinned_selected else None
             audit = _build_program_selection_audit(
-                inventory,
+                audit_inventory,
                 selected_id,
                 selection_policy=pinned_policy,
             )
@@ -762,6 +846,50 @@ async def _fetch_program_scope(conn: Any, program_id: str) -> list[dict[str, Any
         program_id,
     )
     return [_record_to_dict(row) for row in rows]
+
+
+async def _reset_stale_running_scans_for_program(
+    conn: Any,
+    program_id: str,
+    obs: dict[str, Any],
+) -> dict[str, Any]:
+    rows = await conn.fetch(
+        """
+        SELECT scan_id, created_at, started_at
+        FROM scans
+        WHERE program_id = $1::uuid
+          AND status = 'running'
+        ORDER BY created_at DESC
+        """,
+        program_id,
+    )
+    stale = [_record_to_dict(row) for row in rows]
+    result = {
+        "program_id": program_id,
+        "count": len(stale),
+        "scan_ids": [str(row.get("scan_id")) for row in stale],
+    }
+    if not stale:
+        return result
+
+    await conn.execute(
+        """
+        UPDATE scans
+        SET status = 'failed_internal',
+            retry_count = GREATEST(COALESCE(retry_count, 0), 2),
+            error_detail = 'e2e_reset_stale_running_scan',
+            completed_at = NOW()
+        WHERE program_id = $1::uuid
+          AND status = 'running'
+        """,
+        program_id,
+    )
+    _log_step(
+        obs,
+        "Reset stale running scans before trigger: "
+        f"program_id={program_id} count={len(stale)} scan_ids={result['scan_ids']}",
+    )
+    return result
 
 
 def _all_feature_flags_enabled() -> dict[str, bool]:
@@ -1659,16 +1787,26 @@ async def main():
             }}
             return
 
-        # Stage 3
-        t = time.time()
+        # Stages 3 + 4
+        stage3_started = time.time()
+        stage4_started = time.time()
         endpoints = []
         js_assets = []
+        nuclei_findings = []
+
+        enum_task = asyncio.create_task(
+            enumeration.run(ctx, assets, scope_filter, cfg)
+        )
+        nuclei_task = asyncio.create_task(
+            nuclei_scan.run(ctx, assets, scope_filter, cfg)
+        )
+
         try:
-            endpoints, js_assets = await enumeration.run(ctx, assets, scope_filter, cfg)
+            endpoints, js_assets = await enum_task
             record(
                 "stage3_enumeration",
                 "completed",
-                t,
+                stage3_started,
                 endpoint_count=len(endpoints),
                 js_asset_count=len(js_assets),
                 sample_endpoints=[
@@ -1677,17 +1815,33 @@ async def main():
                 ],
             )
         except Exception as exc:
-            record("stage3_enumeration", "failed", t, error=str(exc))
+            record("stage3_enumeration", "failed", stage3_started, error=str(exc))
 
-        # Stage 4
-        t = time.time()
-        nuclei_findings = []
-        try:
-            nuclei_findings = await nuclei_scan.run(ctx, assets, scope_filter, cfg)
+        # Stages 5 + 6
+        stage5_started = time.time()
+        stage6_started = time.time()
+        web_task = asyncio.create_task(
+            web_vuln_tests.run(ctx, endpoints[:30], scope_filter, ctx.feature_flags)
+        )
+        js_task = asyncio.create_task(
+            js_secrets.run(ctx, js_assets)
+        )
+
+        nuclei_findings, web_findings, js_secret_findings = await asyncio.gather(
+            nuclei_task,
+            web_task,
+            js_task,
+            return_exceptions=True,
+        )
+
+        if isinstance(nuclei_findings, Exception):
+            record("stage4_nuclei", "failed", stage4_started, error=str(nuclei_findings))
+            nuclei_findings = []
+        else:
             record(
                 "stage4_nuclei",
                 "completed",
-                t,
+                stage4_started,
                 finding_count=len(nuclei_findings),
                 sample_findings=[
                     {{
@@ -1699,18 +1853,15 @@ async def main():
                     for f in nuclei_findings[:10]
                 ],
             )
-        except Exception as exc:
-            record("stage4_nuclei", "failed", t, error=str(exc))
 
-        # Stage 5
-        t = time.time()
-        web_findings = []
-        try:
-            web_findings = await web_vuln_tests.run(ctx, endpoints[:30], scope_filter, ctx.feature_flags)
+        if isinstance(web_findings, Exception):
+            record("stage5_web_vuln_tests", "failed", stage5_started, error=str(web_findings))
+            web_findings = []
+        else:
             record(
                 "stage5_web_vuln_tests",
                 "completed",
-                t,
+                stage5_started,
                 finding_count=len(web_findings),
                 sample_findings=[
                     {{
@@ -1722,18 +1873,15 @@ async def main():
                     for f in web_findings[:10]
                 ],
             )
-        except Exception as exc:
-            record("stage5_web_vuln_tests", "failed", t, error=str(exc))
 
-        # Stage 6
-        t = time.time()
-        js_secret_findings = []
-        try:
-            js_secret_findings = await js_secrets.run(ctx, js_assets)
+        if isinstance(js_secret_findings, Exception):
+            record("stage6_js_secrets", "failed", stage6_started, error=str(js_secret_findings))
+            js_secret_findings = []
+        else:
             record(
                 "stage6_js_secrets",
                 "completed",
-                t,
+                stage6_started,
                 finding_count=len(js_secret_findings),
                 sample_findings=[
                     {{
@@ -1745,8 +1893,6 @@ async def main():
                     for f in js_secret_findings[:10]
                 ],
             )
-        except Exception as exc:
-            record("stage6_js_secrets", "failed", t, error=str(exc))
 
         out["summary"] = {{
             "asset_count": len(assets),
@@ -1801,11 +1947,12 @@ def _markdown_table(headers: list[str], rows: list[list[Any]]) -> str:
 
 def _write_report(obs: dict[str, Any]) -> None:
     lines: list[str] = []
+    report_display_path = REPORT_PATH.relative_to(ROOT_DIR).as_posix()
 
     lines.append("# AttackBot End-to-End Findings Report")
     lines.append("")
     lines.append(f"- Generated at: `{_utc_now()}`")
-    lines.append(f"- Report file: `{REPORT_PATH.name}`")
+    lines.append(f"- Report file: `{report_display_path}`")
     lines.append(f"- Project root: `{ROOT_DIR}`")
     lines.append(f"- Test outcome: `{obs.get('outcome')}`")
     if obs.get("skip_reason"):
@@ -2383,6 +2530,12 @@ async def test_end_to_end_system_trace_and_findings_documentation():
         else:
             inventory = await _list_program_inventory(conn, PROGRAM_AUDIT_LIMIT)
             selected, selection_policy = _find_program_by_pinned_selector(inventory)
+            if selection_policy is not None and selected is None:
+                selected = await _fetch_pinned_program_inventory_row(conn)
+            audit_inventory = _prepend_program_to_inventory_if_missing(
+                inventory,
+                selected,
+            )
             eligible = [
                 p
                 for p in inventory
@@ -2395,7 +2548,7 @@ async def test_end_to_end_system_trace_and_findings_documentation():
                 selection_policy = "most_recent_eligible_existing_real"
             selected_id = str(selected["program_id"]) if selected else None
             obs["program_selection_audit"] = _build_program_selection_audit(
-                inventory,
+                audit_inventory,
                 selected_id,
                 selection_policy=selection_policy,
             )
@@ -2433,6 +2586,9 @@ async def test_end_to_end_system_trace_and_findings_documentation():
 
         obs["program_id"] = program_id
         obs["program_handle"] = handle
+        obs["stale_running_scan_reset"] = await _reset_stale_running_scans_for_program(
+            conn, program_id, obs
+        )
         obs["program_scope"] = await _fetch_program_scope(conn, program_id)
 
         queue_baseline_purge = await _purge_scan_jobs_for_baseline(obs)

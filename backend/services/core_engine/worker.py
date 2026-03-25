@@ -1,12 +1,11 @@
 from celery import Celery
-from kombu import Queue
 
 from backend.services.core_engine.config import EngineConfig
 from backend.services.core_engine.scan_task import run_scan_task
 from backend.services.core_engine.startup_checks import StartupCheck, collect_toolchain_checks
 from backend.shared.exceptions import MessageSchemaError
 from backend.shared.logging import configure_logging, get_logger
-from backend.shared.queue import Queues, dead_letter_arguments
+from backend.shared.queue import Queues, passive_queue_binding
 from backend.shared.schemas.envelope import MessageEnvelope
 from backend.shared.schemas.scan_jobs import ScanJobsPayload
 
@@ -67,11 +66,7 @@ app.conf.update(
     broker_connection_retry_on_startup=True,
     task_default_queue=Queues.SCAN_JOBS,
     task_queues=(
-        Queue(
-            Queues.SCAN_JOBS,
-            durable=True,
-            queue_arguments=dead_letter_arguments(Queues.SCAN_JOBS),
-        ),
+        passive_queue_binding(Queues.SCAN_JOBS),
     ),
 )
 

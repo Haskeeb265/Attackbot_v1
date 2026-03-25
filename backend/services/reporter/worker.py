@@ -3,11 +3,11 @@ import json
 from typing import Any
 
 from celery import Celery, bootsteps
-from kombu import Consumer, Queue
+from kombu import Consumer
 
 from backend.shared.config import BaseServiceConfig
 from backend.shared.logging import configure_logging, get_logger
-from backend.shared.queue import Queues, dead_letter_arguments
+from backend.shared.queue import Queues, passive_queue_binding
 from backend.shared.schemas.envelope import MessageEnvelope
 from backend.shared.schemas.report_jobs import ReportJobsPayload
 
@@ -162,11 +162,7 @@ class ReportJobsConsumerStep(bootsteps.ConsumerStep):
             Consumer(
                 channel,
                 queues=[
-                    Queue(
-                        Queues.REPORT_JOBS,
-                        durable=True,
-                        queue_arguments=dead_letter_arguments(Queues.REPORT_JOBS),
-                    )
+                    passive_queue_binding(Queues.REPORT_JOBS)
                 ],
                 callbacks=[_on_report_jobs_message],
                 # Core currently publishes envelopes with content_type=None.

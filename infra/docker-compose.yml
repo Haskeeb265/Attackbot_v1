@@ -374,6 +374,8 @@ services:
       MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD}
       E2E_TOOL_TIMEOUT_SCALE: ${E2E_TOOL_TIMEOUT_SCALE:-1.0}
       E2E_TOOL_TIMEOUT_FLOOR_SECONDS: ${E2E_TOOL_TIMEOUT_FLOOR_SECONDS:-30}
+      E2E_FFUF_WORDLIST: ${E2E_FFUF_WORDLIST:-}
+      E2E_SKIP_WAYBACKURLS: ${E2E_SKIP_WAYBACKURLS:-}
     networks: [attackbot-net]
     restart: unless-stopped
     depends_on:

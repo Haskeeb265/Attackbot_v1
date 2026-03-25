@@ -55,7 +55,7 @@ async def run(
                     "nuclei",
                     "-l",
                     targets_file,
-                    "-json",
+                    "-jsonl",
                     "-silent",
                     "-rate-limit",
                     str(config.nuclei_rate_limit),
