@@ -23,6 +23,7 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 import httpx
 import pytest
@@ -140,6 +141,9 @@ PROGRAM_AUDIT_LIMIT = int(os.getenv("E2E_PROGRAM_AUDIT_LIMIT", "200"))
 SCRAPER_TRIGGER_TIMEOUT_SECONDS = int(
     os.getenv("E2E_SCRAPER_TRIGGER_TIMEOUT_SECONDS", "60")
 )
+KNOWN_VULN_TARGET_URL = _env_text(os.getenv("E2E_KNOWN_VULN_TARGET_URL"))
+KNOWN_VULN_PROGRAM_HANDLE = _env_text(os.getenv("E2E_KNOWN_VULN_PROGRAM_HANDLE")) or "known-vuln-target"
+KNOWN_VULN_PROGRAM_NAME = _env_text(os.getenv("E2E_KNOWN_VULN_PROGRAM_NAME")) or "Known Vulnerable Target"
 PINNED_PROGRAM_HANDLE = _env_text(os.getenv("E2E_PINNED_PROGRAM_HANDLE"))
 PINNED_PROGRAM_ID = _env_text(os.getenv("E2E_PINNED_PROGRAM_ID"))
 ENABLE_FORCED_DEEP_TRACE = _truthy(
@@ -729,6 +733,11 @@ def _build_program_selection_audit(
                     "selected: matched both pinned selectors "
                     f"(id={PINNED_PROGRAM_ID}, handle={PINNED_PROGRAM_HANDLE})"
                 )
+            elif selection_policy == "known_vuln_target_url":
+                reason = (
+                    "selected: known vulnerable target mode "
+                    f"(E2E_KNOWN_VULN_TARGET_URL={KNOWN_VULN_TARGET_URL})"
+                )
             else:
                 reason = "selected: most recently updated eligible HackerOne program"
         elif eligible:
@@ -778,6 +787,86 @@ def _find_program_by_pinned_selector(
         return None, "pinned_program_handle"
 
     return None, None
+
+
+async def _upsert_known_vuln_program(
+    conn: Any,
+    target_url: str,
+    handle: str,
+    name: str,
+) -> str:
+    parsed = urlparse(target_url.strip())
+    scheme = (parsed.scheme or "").lower()
+    host = (parsed.hostname or "").lower()
+    if scheme not in {"http", "https"} or not host:
+        raise AssertionError(
+            "E2E_KNOWN_VULN_TARGET_URL must be a valid absolute http(s) URL. "
+            f"Got: {target_url!r}"
+        )
+
+    existing = await conn.fetchrow(
+        """
+        SELECT program_id
+        FROM programs
+        WHERE LOWER(COALESCE(handle, '')) = LOWER($1::text)
+        LIMIT 1
+        """,
+        handle,
+    )
+    program_id = (
+        str(existing["program_id"])
+        if existing
+        else str(uuid.uuid5(uuid.NAMESPACE_URL, f"attackbot-known-vuln:{handle}:{target_url}"))
+    )
+
+    await conn.execute(
+        """
+        INSERT INTO programs (
+            program_id, platform, handle, name, url, bounty_type,
+            max_bounty, is_active, queued_for_scan, created_at, updated_at
+        )
+        VALUES (
+            $1::uuid, 'hackerone', $2::text, $3::text, $4::text, 'bug_bounty',
+            NULL, true, false, NOW(), NOW()
+        )
+        ON CONFLICT (program_id) DO UPDATE
+        SET platform = EXCLUDED.platform,
+            handle = EXCLUDED.handle,
+            name = EXCLUDED.name,
+            url = EXCLUDED.url,
+            bounty_type = EXCLUDED.bounty_type,
+            is_active = true,
+            queued_for_scan = false,
+            updated_at = NOW()
+        """,
+        program_id,
+        handle,
+        name,
+        target_url,
+    )
+
+    await conn.execute(
+        """
+        DELETE FROM program_scopes
+        WHERE program_id = $1::uuid
+        """,
+        program_id,
+    )
+
+    await conn.execute(
+        """
+        INSERT INTO program_scopes (
+            scope_id, program_id, scope_type, asset_type, value, notes, created_at
+        )
+        VALUES
+            (gen_random_uuid(), $1::uuid, 'in_scope', 'url', $2::text, 'known-vuln-target-url', NOW()),
+            (gen_random_uuid(), $1::uuid, 'in_scope', 'domain', $3::text, 'known-vuln-target-host', NOW())
+        """,
+        program_id,
+        target_url,
+        host,
+    )
+    return program_id
 
 
 async def _select_live_hackerone_program(
@@ -1965,6 +2054,11 @@ def _write_report(obs: dict[str, Any]) -> None:
     lines.append("- Full end-to-end execution attempted against current M3 stack.")
     lines.append("- All feature flags were set to `true` in scan start payload.")
     lines.append("- Live-mode policy: no seeded/dummy fallback for primary scan.")
+    if KNOWN_VULN_TARGET_URL:
+        lines.append(
+            "- Known vulnerable target mode active via "
+            "`E2E_KNOWN_VULN_TARGET_URL`."
+        )
     if PINNED_PROGRAM_HANDLE or PINNED_PROGRAM_ID:
         lines.append(
             "- Program selection override active via "
@@ -1993,6 +2087,9 @@ def _write_report(obs: dict[str, Any]) -> None:
     lines.append(
         f"- Pinned program ID override: `{obs.get('pinned_program_id')}`"
     )
+    if KNOWN_VULN_TARGET_URL:
+        lines.append(f"- Known vulnerable target URL override: `{KNOWN_VULN_TARGET_URL}`")
+        lines.append(f"- Known vulnerable target handle override: `{KNOWN_VULN_PROGRAM_HANDLE}`")
     lines.append(f"- Program ID: `{obs.get('program_id')}`")
     lines.append(f"- Program handle: `{obs.get('program_handle')}`")
     lines.append(f"- Scan ID: `{obs.get('scan_id')}`")
@@ -2368,6 +2465,8 @@ async def test_end_to_end_system_trace_and_findings_documentation():
         "live_hackerone_mode": LIVE_HACKERONE_ONLY,
         "pinned_program_handle": PINNED_PROGRAM_HANDLE,
         "pinned_program_id": PINNED_PROGRAM_ID,
+        "known_vuln_target_url": KNOWN_VULN_TARGET_URL,
+        "known_vuln_program_handle": KNOWN_VULN_PROGRAM_HANDLE,
         "program_selection_policy": None,
         "credential_state": {},
         "scrape_trigger_response": {},
@@ -2446,13 +2545,43 @@ async def test_end_to_end_system_trace_and_findings_documentation():
                 f"E2E_PINNED_PROGRAM_HANDLE={PINNED_PROGRAM_HANDLE!r}",
             )
 
-        if LIVE_HACKERONE_ONLY and (not username_present or not token_present):
+        known_vuln_mode = bool(KNOWN_VULN_TARGET_URL)
+        known_vuln_program_id: str | None = None
+        if known_vuln_mode:
+            _log_step(
+                obs,
+                "Known vulnerable target mode configured: "
+                f"E2E_KNOWN_VULN_TARGET_URL={KNOWN_VULN_TARGET_URL!r} "
+                f"E2E_KNOWN_VULN_PROGRAM_HANDLE={KNOWN_VULN_PROGRAM_HANDLE!r}",
+            )
+
+        if (
+            LIVE_HACKERONE_ONLY
+            and not known_vuln_mode
+            and (not username_present or not token_present)
+        ):
             raise AssertionError(
                 "Live HackerOne mode is enabled but credentials are missing in process env. "
                 "Expected HACKERONE_API_USERNAME and HACKERONE_API_TOKEN."
             )
 
-        if username_present and token_present:
+        if known_vuln_mode:
+            _log_step(
+                obs,
+                "Known vulnerable target mode active; skipping live scraper sync trigger",
+            )
+            known_vuln_program_id = await _upsert_known_vuln_program(
+                conn=conn,
+                target_url=str(KNOWN_VULN_TARGET_URL),
+                handle=str(KNOWN_VULN_PROGRAM_HANDLE),
+                name=str(KNOWN_VULN_PROGRAM_NAME),
+            )
+            _log_step(
+                obs,
+                "Upserted known vulnerable target program: "
+                f"program_id={known_vuln_program_id} handle={KNOWN_VULN_PROGRAM_HANDLE}",
+            )
+        elif username_present and token_present:
             _log_step(obs, "HackerOne credentials detected; triggering live scraper sync")
             try:
                 async with httpx.AsyncClient(timeout=SCRAPER_TRIGGER_TIMEOUT_SECONDS) as client:
@@ -2487,7 +2616,38 @@ async def test_end_to_end_system_trace_and_findings_documentation():
         else:
             _log_step(obs, "HackerOne credentials not present in runtime env")
 
-        if LIVE_HACKERONE_ONLY:
+        if known_vuln_program_id:
+            inventory = await _list_program_inventory(conn, PROGRAM_AUDIT_LIMIT)
+            selected_program = next(
+                (
+                    program
+                    for program in inventory
+                    if str(program.get("program_id")) == str(known_vuln_program_id)
+                ),
+                None,
+            )
+            if not selected_program:
+                raise AssertionError(
+                    "Known vulnerable target program was upserted but could not be reloaded. "
+                    f"program_id={known_vuln_program_id}"
+                )
+
+            selected_id = str(selected_program.get("program_id"))
+            obs["program_selection_audit"] = _build_program_selection_audit(
+                inventory,
+                selected_id,
+                selection_policy="known_vuln_target_url",
+            )
+            obs["program_selection_policy"] = "known_vuln_target_url"
+            program_id = selected_id
+            handle = str(selected_program.get("handle") or "")
+            obs["program_source"] = "known_vuln_target_seeded"
+            _log_step(
+                obs,
+                "Selected known vulnerable target program for scan: "
+                f"{program_id} ({handle}) target_url={KNOWN_VULN_TARGET_URL}",
+            )
+        elif LIVE_HACKERONE_ONLY:
             selected_program, audit, selection_policy = await _select_live_hackerone_program(
                 conn, obs
             )
