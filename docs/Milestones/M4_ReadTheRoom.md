@@ -1,9 +1,11 @@
 # AttackBot — M4 Low-Level Implementation Plan
-> Version: 2.0 | Date: 2026-03-28
+> Version: 2.1 | Date: 2026-03-29
 > Picks up directly from M3 completion state. Every step produces something testable. Read the full step before writing any code.
 > Changes from v1.5: fourteen issues resolved — see "Changes from v1.5" section at the bottom.
 
 ---
+
+> Changes from v2.0: execution gates added, finding inclusion policy aligned with M3 reality, and ISS-009 test update made explicit.
 
 ## Pre-flight Checklist
 
@@ -32,6 +34,38 @@ curl http://localhost:8002/api/v1/scans
 ```
 
 If any of these fail, fix M3 before starting M4.
+
+---
+
+## Execution Gates (Must Not Be Skipped)
+
+Use these as hard pass/fail checkpoints throughout implementation:
+
+### Gate 0 - M3 Baseline Locked
+
+- `alembic current` shows `003 (head)` before any M4 schema work
+- Existing M3 unit + integration suites are green
+- Latest known-vuln E2E trace still reaches a terminal scan state and publishes `report.jobs`
+
+### Gate 1 - ISS-009 Complete
+
+- `POST /api/v1/scrape/trigger` returns `202 Accepted` immediately
+- Caller behavior is polling-based (no blocking-on-completion assumption)
+- `tests/integrations/test_scraper_pipeline.py::test_trigger_produces_programs_in_db` is updated to poll rather than assert `body["status"] == "completed"`
+
+### Gate 2 - Reporter Plumbing Alive
+
+- Migration `004_reporter` applied cleanly
+- Reporter health endpoint green with DB/RabbitMQ/MinIO components healthy
+- `report.jobs` messages are consumed without worker crash loops
+
+### Gate 3 - First End-to-End Artifact
+
+- At least one real PDF artifact is generated from a completed/partial scan
+- `GET /api/v1/reports/{report_id}/download` returns a valid presigned URL
+- Downloaded bytes validate as `%PDF`
+
+Only move to the next gate when the previous gate is fully green.
 
 ---
 
@@ -86,7 +120,7 @@ tests/
 │   └── reporter/
 │       ├── scan_with_findings.json             ← NEW
 │       ├── scan_zero_findings.json             ← NEW
-│       ├── findings_verified.json              ← NEW
+│       ├── findings_mixed_verification.json    ← NEW
 │       ├── findings_zero.json                  ← NEW
 │       ├── finding_evidence.json               ← NEW
 │       ├── program_detail.json                 ← NEW
@@ -588,6 +622,7 @@ class ParsedFinding:
     description: str
     reproduction_steps: str | None
     source: str | None
+    is_verified: bool
     raw_output: dict | None
     evidence: list[EvidenceArtifact] = field(default_factory=list)
 
@@ -738,9 +773,11 @@ Fetch:
 
 ```
 GET /api/v1/scans/{scan_id}
-GET /api/v1/scans/{scan_id}/findings?verified=true
+GET /api/v1/scans/{scan_id}/findings
 GET /api/v1/scans/{scan_id}/findings/{finding_id}/evidence
 ```
+
+M4 policy: fetch all findings and preserve each finding's `is_verified` flag for rendering. Do not filter to verified-only at the client layer.
 
 ### Scraper client
 
@@ -845,13 +882,14 @@ class ParsedScanBuilder:
 
 ### Rules
 
-- Include only `is_verified=True` findings (filter at this layer, not in the renderer)
+- Include all findings returned by Core Engine in M4
+- Preserve each finding's `is_verified` flag for renderer display (table column + badges/labels)
 - Normalize all severity strings to lowercase canonical values using `_normalize_severity_key()`
 - Normalize all `severity_breakdown` dicts using `_normalize_severity_breakdown()`
 - Sort findings by severity rank descending, then title ascending, then URL ascending
 - Severity rank: critical=4, high=3, medium=2, low=1, info=0
 - Keep `exploit_chain_refs` object shape from the queue contract
-- If no findings after filtering, return clean report mode — `is_clean()` returns `True`
+- If no findings are returned, enter clean report mode — `is_clean()` returns `True`
 - If no findings but `exploit_chains` is non-empty, log a warning and ignore the chains (data inconsistency, not a fatal error)
 
 ---
@@ -1031,7 +1069,7 @@ for format_name in formats:
 1. Cover
 2. Executive Summary
 3. Scope Overview
-4. Findings Table (sorted by severity descending)
+4. Findings Table (sorted by severity descending, includes Verification Status column)
 5. Per-Finding Detail (one section per finding)
 6. Exploit Chains section, or Chain Availability Note if M8 is not yet running
 7. Appendix — Reproduction Packs
@@ -1046,6 +1084,12 @@ for format_name in formats:
 4. No Findings Statement
 5. Coverage Notes
 6. Appendix — Scan Metadata
+
+### Executive Summary verification caveat
+
+For M4, findings may include unverified items because M7 verification is not yet live. Include this caveat in the Executive Summary when any finding has `is_verified=False`:
+
+> Verification note: This report may include unverified findings from the current scan pipeline. Evidence-backed verification gating is scheduled for M7.
 
 ### `include_raw_http_appendix` wiring
 
@@ -1550,7 +1594,9 @@ A zero-findings report must:
 
 **Suggested wording in the No Findings Statement section:**
 
-> No verified findings were produced for this scan. This report reflects the completed scan state and the scope reviewed at generation time. It should not be interpreted as proof of absence of vulnerabilities beyond the tested coverage captured below.
+> No findings were produced for this scan. This report reflects the completed scan state and the scope reviewed at generation time. It should not be interpreted as proof of absence of vulnerabilities beyond the tested coverage captured below.
+
+Because M4 includes all findings (not only verified), this clean-report path should be less common than in verified-only designs.
 
 The `ParsedScan.is_clean()` method is the single gate for this path — renderers check it once and render the appropriate section set. Do not scatter `if findings:` checks throughout the render code.
 
@@ -1561,8 +1607,10 @@ The `ParsedScan.is_clean()` method is the single gate for this path — renderer
 ### Must-have unit tests
 
 ```
-test_parsed_scan_filters_unverified_findings
+test_parsed_scan_includes_unverified_findings_with_flag
 test_zero_findings_returns_clean_mode
+test_findings_table_includes_verification_status_column
+test_executive_summary_includes_unverified_caveat_when_needed
 test_include_evidence_flag_false_skips_evidence_fetch
 test_reproduction_pack_generation_uses_fallback_per_finding
 test_fallback_pack_contains_required_marker_string
@@ -1641,7 +1689,7 @@ Only compare normalized text output — never binary files:
 - Two `reports.completed` events published
 
 **Scenario B — zero-findings report**
-- Verified findings endpoint returns `[]`
+- Findings endpoint returns `[]`
 - Artifact generated and uploaded
 - PDF content (extracted with `pdfplumber`) contains the no-findings statement string
 - Report row reaches `completed`
@@ -2005,3 +2053,15 @@ M4 is done only when all of the following are true:
 | 12 | 🔵 Minor | Upstream health reachability now uses a 30-second cache with `_check_upstream_cached()` implementation |
 | 13 | 🔵 Minor | `mark_partial()` `generated_at` rule promoted to a prominent callout box in Step 4.7 |
 | 14 | 🔵 Minor | Attack Graph `degraded` vs `unhealthy` distinction defined clearly with a table in Step 4.8 |
+
+---
+
+## Changes from v2.0
+
+| # | Severity | Change made |
+|---|---|---|
+| 1 | Critical | Added explicit execution gates (Gate 0-3) with hard progression criteria |
+| 2 | Critical | Updated finding policy to include all findings in M4 and preserve `is_verified` for display |
+| 3 | Moderate | Updated Core Engine client contract in M4 from verified-only fetch to full findings fetch |
+| 4 | Moderate | Added renderer requirements for verification-status column and executive-summary caveat |
+| 5 | Moderate | Made ISS-009 test migration explicit in Gate 1 (`test_trigger_produces_programs_in_db` polling update) |

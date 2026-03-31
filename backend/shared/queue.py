@@ -309,6 +309,19 @@ class QueuePublisher:
             log.error("publish_failed", queue=queue_name, error=str(e))
             return False
 
+    async def ensure_queue(self, queue_name: str, durable: bool = True) -> None:
+        """
+        Actively declare a queue. Safe to call when queue already exists.
+
+        Use this when the service is primarily a publisher (for example,
+        reporter publishing reports.completed) and cannot rely on a consumer to
+        have declared the queue first.
+        """
+        if self._channel is None:
+            raise QueueConnectionError("Publisher not connected.")
+        await self._channel.declare_queue(queue_name, durable=durable)
+        self._validated_queues.add(queue_name)
+
     async def close(self) -> None:
         """Gracefully close the connection."""
         if self._connection:

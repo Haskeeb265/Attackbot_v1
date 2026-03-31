@@ -28,6 +28,10 @@ from backend.shared.schemas.report_jobs import (
     SeverityBreakdown,
     build_report_job_message,
 )
+from backend.shared.schemas.reports_completed import (
+    ReportsCompletedPayload,
+    build_reports_completed_message,
+)
 from backend.shared.schemas.scan_jobs import (
     FeatureFlags,
     ScanJobsPayload,
@@ -53,6 +57,7 @@ class TestBaseServiceConfigScaling:
 class TestQueueDeadLetterArguments:
     def test_dead_letter_args_for_primary_queue(self):
         pytest.importorskip("aio_pika")
+        pytest.importorskip("kombu")
         from backend.shared.queue import Queues, dead_letter_arguments
 
         assert dead_letter_arguments(Queues.SCAN_JOBS) == {
@@ -62,9 +67,20 @@ class TestQueueDeadLetterArguments:
 
     def test_dead_letter_args_for_non_dlq_queue(self):
         pytest.importorskip("aio_pika")
+        pytest.importorskip("kombu")
         from backend.shared.queue import Queues, dead_letter_arguments
 
         assert dead_letter_arguments(Queues.REPORTS_COMPLETED) is None
+
+    @pytest.mark.asyncio
+    async def test_queue_publisher_ensure_queue_requires_connection(self):
+        pytest.importorskip("aio_pika")
+        pytest.importorskip("kombu")
+        from backend.shared.queue import QueuePublisher
+
+        publisher = QueuePublisher("amqp://guest:guest@localhost/")
+        with pytest.raises(QueueConnectionError):
+            await publisher.ensure_queue("reports.completed")
 
 
 # ── Exception hierarchy ────────────────────────────────────────────────────
@@ -322,9 +338,27 @@ class TestReportJobsPayload:
         assert "pdf" in payload.formats_requested
         assert "docx" in payload.formats_requested
 
-    def test_formats_requested_min_one(self):
-        with pytest.raises(ValidationError):
-            _make_report_payload(formats_requested=[])
+    def test_formats_requested_empty_defaults_to_both(self):
+        payload = _make_report_payload(formats_requested=[])
+        assert payload.formats_requested == ["pdf", "docx"]
+
+    def test_report_ids_optional_for_organic_messages(self):
+        payload = _make_report_payload(report_ids=None)
+        assert payload.report_ids is None
+
+    def test_report_ids_keys_must_match_formats(self):
+        with pytest.raises(ValidationError, match="report_ids keys must exactly match"):
+            _make_report_payload(
+                formats_requested=["pdf", "docx"],
+                report_ids={"pdf": uuid.uuid4()},
+            )
+
+    def test_report_ids_accept_regenerate_shape(self):
+        payload = _make_report_payload(
+            formats_requested=["pdf", "docx"],
+            report_ids={"pdf": uuid.uuid4(), "docx": uuid.uuid4()},
+        )
+        assert set(payload.report_ids.keys()) == {"pdf", "docx"}
 
     def test_build_report_job_message(self):
         payload = _make_report_payload()
@@ -333,3 +367,22 @@ class TestReportJobsPayload:
         assert msg["source_service"] == "core-engine"
         inner = ReportJobsPayload.model_validate(msg["payload"])
         assert inner.scan_id == payload.scan_id
+
+
+class TestReportsCompletedPayload:
+    def test_build_reports_completed_message(self):
+        payload = ReportsCompletedPayload(
+            report_id=uuid.uuid4(),
+            scan_id=uuid.uuid4(),
+            program_id=uuid.uuid4(),
+            format="pdf",
+            status="completed",
+            storage_path="reports/test-id/report.pdf",
+            file_size_bytes=12345,
+            generated_at=datetime.now(timezone.utc),
+        )
+        msg = build_reports_completed_message(payload, source_service="reporter-worker")
+        assert msg["event_type"] == "report.generated"
+        assert msg["source_service"] == "reporter-worker"
+        inner = ReportsCompletedPayload.model_validate(msg["payload"])
+        assert inner.report_id == payload.report_id

@@ -404,6 +404,60 @@ async def get_findings(scan_id: str) -> JSONResponse:
     return JSONResponse({"findings": findings, "count": len(findings)})
 
 
+@app.get("/api/v1/scans/{scan_id}/findings/{finding_id}/evidence")
+async def get_finding_evidence(scan_id: str, finding_id: str) -> JSONResponse:
+    """
+    Read-only evidence endpoint for reporter.
+    Returns an empty list when no evidence rows exist.
+    Returns 404 only when finding_id does not belong to scan_id.
+    """
+    async with get_session() as session:
+        from sqlalchemy import text
+
+        finding_row = await session.execute(
+            text(
+                """
+                SELECT finding_id
+                FROM findings
+                WHERE scan_id = :scan_id AND finding_id = :finding_id
+                """
+            ),
+            {"scan_id": scan_id, "finding_id": finding_id},
+        )
+        if finding_row.fetchone() is None:
+            return JSONResponse({"error": "not found"}, status_code=404)
+
+        rows = await session.execute(
+            text(
+                """
+                SELECT evidence_id, artifact_type, storage_path, description, captured_at
+                FROM finding_evidence
+                WHERE finding_id = :finding_id
+                ORDER BY captured_at ASC
+                """
+            ),
+            {"finding_id": finding_id},
+        )
+        items = [
+            {
+                "evidence_id": str(row[0]),
+                "artifact_type": row[1],
+                "storage_path": row[2],
+                "description": row[3],
+                "captured_at": row[4].isoformat() if row[4] else None,
+            }
+            for row in rows.fetchall()
+        ]
+
+    return JSONResponse(
+        {
+            "finding_id": finding_id,
+            "scan_id": scan_id,
+            "items": items,
+        }
+    )
+
+
 @app.get("/api/v1/queue/dlq/inspect")
 async def inspect_dlq() -> JSONResponse:
     queue_states = await inspect_queue_states(

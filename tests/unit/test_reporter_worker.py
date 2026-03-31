@@ -9,7 +9,7 @@ except ModuleNotFoundError:
     worker = None
 
 
-pytestmark = pytest.mark.skipif(worker is None, reason="celery not installed")
+pytestmark = pytest.mark.skipif(worker is None, reason="celery/kombu not installed")
 
 
 def _valid_report_envelope() -> dict:
@@ -42,35 +42,34 @@ def _valid_report_envelope() -> dict:
     }
 
 
-def test_handle_report_job_message_valid_envelope_logs_and_returns() -> None:
+def test_handle_report_job_message_valid_envelope_enqueues_task() -> None:
     envelope = _valid_report_envelope()
     with (
         patch.object(worker.log, "info") as info_mock,
-        patch.object(worker.log, "warning") as warning_mock,
         patch.object(worker.log, "error") as error_mock,
+        patch.object(worker.reporter_worker_task, "apply_async") as apply_async_mock,
     ):
         worker._handle_report_job_message(envelope)
 
     error_mock.assert_not_called()
+    apply_async_mock.assert_called_once()
+
     info_event_names = [call.args[0] for call in info_mock.call_args_list]
     assert "report_job_received" in info_event_names
     assert "report_job_formats_requested" in info_event_names
-    warning_mock.assert_called_once()
-    assert warning_mock.call_args.args[0] == "report_generation_not_yet_implemented"
+    assert "report_generation_task_enqueued" in info_event_names
 
 
 def test_handle_report_job_message_malformed_body_logs_error() -> None:
     with (
         patch.object(worker.log, "error") as error_mock,
         patch.object(worker.log, "info") as info_mock,
-        patch.object(worker.log, "warning") as warning_mock,
     ):
         worker._handle_report_job_message("not-json")
 
     error_mock.assert_called_once()
     assert error_mock.call_args.args[0] == "report_job_malformed_envelope"
     info_mock.assert_not_called()
-    warning_mock.assert_not_called()
 
 
 def test_raw_consumer_callback_always_acks() -> None:
@@ -88,18 +87,49 @@ def test_raw_consumer_callback_always_acks() -> None:
     assert dummy_message.acked is True
 
 
-def test_reporter_worker_task_logs_compat_invocation_source() -> None:
+def test_reporter_worker_task_invokes_report_processing() -> None:
     envelope = _valid_report_envelope()
-    with (
-        patch.object(worker.log, "warning") as warning_mock,
-        patch.object(worker.log, "info"),
-        patch.object(worker.log, "error"),
-    ):
+    with patch.object(worker, "process_report_envelope_sync") as process_mock:
         worker.reporter_worker_task.run(envelope)
 
-    compat_calls = [
-        call for call in warning_mock.call_args_list
-        if call.args and call.args[0] == "report_job_received_via_celery_task_path"
-    ]
-    assert compat_calls
-    assert compat_calls[0].kwargs.get("invocation_source") == "celery_compat"
+    process_mock.assert_called_once_with(envelope)
+
+
+def test_retry_countdown_clamps_to_final_backoff_entry() -> None:
+    assert worker._retry_countdown(0, [60, 300, 600]) == 60
+    assert worker._retry_countdown(2, [60, 300, 600]) == 600
+    assert worker._retry_countdown(8, [60, 300, 600]) == 600
+
+
+def test_handle_task_exception_retries_before_exhaustion() -> None:
+    class _RetrySignal(Exception):
+        pass
+
+    class _DummyTask:
+        request = type("_Req", (), {"retries": 0})()
+
+        @staticmethod
+        def retry(*, exc, countdown):
+            raise _RetrySignal(f"countdown={countdown}")
+
+    with pytest.raises(_RetrySignal):
+        worker._handle_task_exception(_DummyTask(), _valid_report_envelope(), RuntimeError("boom"))
+
+
+def test_handle_task_exception_exhausted_publishes_to_dlq() -> None:
+    class _DummyTask:
+        request = type("_Req", (), {"retries": worker.settings.report_task_max_retries})()
+
+        @staticmethod
+        def retry(*, exc, countdown):
+            raise AssertionError("retry should not be called when retries are exhausted")
+
+    with (
+        patch.object(worker, "_publish_to_report_jobs_dlq_sync", return_value=True) as dlq_mock,
+        patch.object(worker.log, "error") as log_error_mock,
+        pytest.raises(RuntimeError, match="boom"),
+    ):
+        worker._handle_task_exception(_DummyTask(), _valid_report_envelope(), RuntimeError("boom"))
+
+    dlq_mock.assert_called_once()
+    assert any(call.args[0] == "report_generation_retries_exhausted" for call in log_error_mock.call_args_list)

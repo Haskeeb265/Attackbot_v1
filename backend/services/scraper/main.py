@@ -21,7 +21,7 @@ from uuid import UUID
 
 import redis.asyncio as aioredis
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import BackgroundTasks, FastAPI, HTTPException, Query
 
 from backend.services.scraper.collectors import hackerone  # noqa: F401 — triggers registration
 from backend.services.scraper.collectors.base import CollectorRegistry
@@ -367,13 +367,23 @@ async def health() -> HealthResponse:
 # Scrape trigger
 # ---------------------------------------------------------------------------
 
-@app.post("/api/v1/scrape/trigger")
-async def trigger_scrape(platform: str = "hackerone") -> dict:
-    """Trigger an immediate scrape for a platform, outside the normal schedule."""
+@app.post("/api/v1/scrape/trigger", status_code=202)
+async def trigger_scrape(
+    background_tasks: BackgroundTasks,
+    platform: str = "hackerone",
+) -> dict:
+    """
+    Trigger an immediate scrape for a platform in the background.
+    Caller should poll /api/v1/programs for completion effects.
+    """
     if platform not in CollectorRegistry.all_platforms():
         raise HTTPException(status_code=400, detail=f"Unknown platform: {platform!r}")
-    result = await _run_platform_scrape(platform)
-    return result
+    background_tasks.add_task(_run_platform_scrape, platform)
+    return {
+        "status": "accepted",
+        "platform": platform,
+        "message": "Scrape started in background",
+    }
 
 
 @app.post("/api/v1/scan-jobs/trigger")

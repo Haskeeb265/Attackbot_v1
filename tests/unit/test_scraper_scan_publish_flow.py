@@ -2,9 +2,20 @@ from unittest.mock import AsyncMock, patch
 from uuid import uuid4
 
 import pytest
+from fastapi import HTTPException
 
-from backend.services.scraper import main
 from backend.services.scraper.models import Program, ProgramScope, RawProgram
+
+try:
+    from backend.services.scraper import main
+except ModuleNotFoundError as exc:
+    if exc.name == "kombu":
+        main = None
+    else:
+        raise
+
+
+pytestmark = pytest.mark.skipif(main is None, reason="kombu not installed")
 
 
 class _DummyLock:
@@ -37,6 +48,40 @@ class _DummyCollector:
             name="Demo",
             scopes=[ProgramScope("in_scope", "domain", "example.com")],
         )
+
+
+class _DummyBackgroundTasks:
+    def __init__(self) -> None:
+        self.calls = []
+
+    def add_task(self, fn, *args, **kwargs) -> None:
+        self.calls.append((fn, args, kwargs))
+
+
+@pytest.mark.asyncio
+async def test_trigger_scrape_returns_accepted_and_schedules_background_task() -> None:
+    background_tasks = _DummyBackgroundTasks()
+
+    with patch.object(main.CollectorRegistry, "all_platforms", return_value=["hackerone"]):
+        result = await main.trigger_scrape(background_tasks=background_tasks, platform="hackerone")
+
+    assert result["status"] == "accepted"
+    assert result["platform"] == "hackerone"
+    assert len(background_tasks.calls) == 1
+    scheduled_fn, scheduled_args, _ = background_tasks.calls[0]
+    assert scheduled_fn is main._run_platform_scrape
+    assert scheduled_args == ("hackerone",)
+
+
+@pytest.mark.asyncio
+async def test_trigger_scrape_rejects_unknown_platform() -> None:
+    background_tasks = _DummyBackgroundTasks()
+    with patch.object(main.CollectorRegistry, "all_platforms", return_value=["hackerone"]):
+        with pytest.raises(HTTPException):
+            await main.trigger_scrape(
+                background_tasks=background_tasks,
+                platform="not-a-real-platform",
+            )
 
 
 @pytest.mark.asyncio

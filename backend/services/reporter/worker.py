@@ -1,22 +1,18 @@
-# backend/services/reporter/worker.py
+import asyncio
 import json
 from typing import Any
 
 from celery import Celery, bootsteps
 from kombu import Consumer
 
-from backend.shared.config import BaseServiceConfig
+from backend.services.reporter.config import ReporterConfig
+from backend.services.reporter.report_task import process_report_envelope_sync
 from backend.shared.logging import configure_logging, get_logger
-from backend.shared.queue import Queues, passive_queue_binding
+from backend.shared.queue import QueuePublisher, Queues, passive_queue_binding
 from backend.shared.schemas.envelope import MessageEnvelope
 from backend.shared.schemas.report_jobs import ReportJobsPayload
 
-
-class WorkerConfig(BaseServiceConfig):
-    service_name: str = "reporter-worker"
-
-
-settings = WorkerConfig()
+settings = ReporterConfig(service_name="reporter-worker")
 configure_logging(settings.service_name, settings.log_level)
 log = get_logger(__name__)
 
@@ -34,10 +30,14 @@ app.conf.update(
     worker_prefetch_multiplier=1,
     task_reject_on_worker_lost=True,
     broker_connection_retry_on_startup=True,
-    # Keep Celery task transport available for future use, but report.jobs
+    # Keep Celery task transport available for task execution while report.jobs
     # is consumed by the raw consumer below.
     task_default_queue="reporter.worker.tasks",
 )
+
+
+def _retry_countdown(attempt_number: int, backoff: list[int]) -> int:
+    return backoff[min(attempt_number, len(backoff) - 1)]
 
 
 def _serialize_raw_body(raw_body: Any) -> str:
@@ -127,11 +127,56 @@ def _handle_report_job_message(raw_body: Any) -> None:
             include_evidence_screenshots=payload.include_evidence_screenshots,
         )
 
-    log.warning(
-        "report_generation_not_yet_implemented",
+    reporter_worker_task.apply_async(
+        args=[envelope_dict],
+        queue=app.conf.task_default_queue,
+    )
+    log.info(
+        "report_generation_task_enqueued",
+        queue=app.conf.task_default_queue,
         scan_id=str(payload.scan_id),
         program_id=str(payload.program_id),
+        formats_requested=payload.formats_requested,
     )
+
+
+async def _publish_to_report_jobs_dlq(message: dict[str, Any]) -> bool:
+    publisher = QueuePublisher(settings.rabbitmq_url)
+    await publisher.connect()
+    try:
+        await publisher.ensure_queue(Queues.REPORT_JOBS_DLQ)
+        return await publisher.publish(Queues.REPORT_JOBS_DLQ, message)
+    finally:
+        await publisher.close()
+
+
+def _publish_to_report_jobs_dlq_sync(message: dict[str, Any]) -> bool:
+    try:
+        return asyncio.run(_publish_to_report_jobs_dlq(message))
+    except Exception as exc:
+        log.error(
+            "report_generation_dlq_publish_failed",
+            queue=Queues.REPORT_JOBS_DLQ,
+            error=str(exc),
+        )
+        return False
+
+
+def _handle_task_exception(task: Any, message: dict[str, Any], exc: Exception) -> None:
+    retries = int(getattr(task.request, "retries", 0))
+    if retries < settings.report_task_max_retries:
+        countdown = _retry_countdown(retries, settings.get_retry_backoff())
+        raise task.retry(exc=exc, countdown=countdown)
+
+    dlq_published = _publish_to_report_jobs_dlq_sync(message)
+    log.error(
+        "report_generation_retries_exhausted",
+        retries=retries,
+        max_retries=settings.report_task_max_retries,
+        error=str(exc),
+        dlq_published=dlq_published,
+    )
+    raise exc
 
 
 def _on_report_jobs_message(body: Any, message: Any) -> None:
@@ -161,9 +206,7 @@ class ReportJobsConsumerStep(bootsteps.ConsumerStep):
         return [
             Consumer(
                 channel,
-                queues=[
-                    passive_queue_binding(Queues.REPORT_JOBS)
-                ],
+                queues=[passive_queue_binding(Queues.REPORT_JOBS)],
                 callbacks=[_on_report_jobs_message],
                 # Core currently publishes envelopes with content_type=None.
                 # Keep accept=None so raw bodies are still delivered, then parse explicitly.
@@ -175,15 +218,12 @@ class ReportJobsConsumerStep(bootsteps.ConsumerStep):
 app.steps["consumer"].add(ReportJobsConsumerStep)
 
 
-@app.task(name="reporter_worker_task", bind=True, max_retries=0)
+@app.task(name="reporter_worker_task", bind=True)
 def reporter_worker_task(self, message: dict) -> None:  # type: ignore[misc]
     """
-    Compatibility task entrypoint in case report jobs are sent as Celery tasks.
+    Task entrypoint for actual report generation processing.
     """
-    log.warning(
-        "report_job_received_via_celery_task_path",
-        queue=app.conf.task_default_queue,
-        invocation_source="celery_compat",
-        note="Expected path is raw kombu consumer on report.jobs",
-    )
-    _handle_report_job_message(message)
+    try:
+        process_report_envelope_sync(message)
+    except Exception as exc:
+        _handle_task_exception(self, message, exc)

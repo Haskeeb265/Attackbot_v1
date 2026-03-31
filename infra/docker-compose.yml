@@ -294,6 +294,8 @@ services:
     build:
       context: ..
       dockerfile: backend/services/reporter/Dockerfile
+    ports:
+      - "8003:8003"
     environment:
       SERVICE_NAME: reporter
       DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
@@ -302,6 +304,8 @@ services:
       MINIO_ENDPOINT: minio:9000
       MINIO_ACCESS_KEY: ${MINIO_ROOT_USER}
       MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD}
+      REPORT_TASK_RETRY_BACKOFF_SECONDS_STR: ${REPORT_TASK_RETRY_BACKOFF_SECONDS_STR:-60,300,600}
+      FORCE_UPLOAD_FAILURE_REPORT_IDS_STR: ${FORCE_UPLOAD_FAILURE_REPORT_IDS_STR:-}
     networks: [attackbot-net]
     restart: unless-stopped
     depends_on:
@@ -402,6 +406,8 @@ services:
       MINIO_ENDPOINT: minio:9000
       MINIO_ACCESS_KEY: ${MINIO_ROOT_USER}
       MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD}
+      REPORT_TASK_RETRY_BACKOFF_SECONDS_STR: ${REPORT_TASK_RETRY_BACKOFF_SECONDS_STR:-60,300,600}
+      FORCE_UPLOAD_FAILURE_REPORT_IDS_STR: ${FORCE_UPLOAD_FAILURE_REPORT_IDS_STR:-}
     networks: [attackbot-net]
     restart: unless-stopped
     depends_on:

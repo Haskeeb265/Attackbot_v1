@@ -2,7 +2,7 @@
 from typing import Any, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from backend.shared.schemas.envelope import build_envelope
 
@@ -56,7 +56,7 @@ class ReportJobsPayload(BaseModel):
     # ── Scan outcome ───────────────────────────────────────────────────
     status: Literal["completed", "partial"]
     partial_stages: list[str] = Field(
-        default=[],
+        default_factory=list,
         description="Names of stages with non-fatal failures. Noted in Executive Summary.",
     )
 
@@ -67,13 +67,13 @@ class ReportJobsPayload(BaseModel):
     severity_breakdown: SeverityBreakdown
 
     # ── Exploit chains ─────────────────────────────────────────────────
-    exploit_chains: list[ExploitChainRef] = Field(default=[])
+    exploit_chains: list[ExploitChainRef] = Field(default_factory=list)
 
     # ── Report generation parameters ──────────────────────────────────
     formats_requested: list[Literal["pdf", "docx"]] = Field(
-        default=["pdf", "docx"],
-        min_length=1,
+        default_factory=lambda: ["pdf", "docx"],
     )
+    report_ids: dict[Literal["pdf", "docx"], UUID] | None = None
     include_evidence_screenshots: bool = Field(default=True)
 
     @field_validator("finding_count")
@@ -85,6 +85,28 @@ class ReportJobsPayload(BaseModel):
         if has_findings is False and v > 0:
             raise ValueError("has_findings=False but finding_count>0. Inconsistent state.")
         return v
+
+    @field_validator("formats_requested", mode="before")
+    @classmethod
+    def normalize_formats_requested(cls, v: Any) -> list[str]:
+        if v is None:
+            return ["pdf", "docx"]
+        if isinstance(v, list) and len(v) == 0:
+            # Compatibility rule for M4: empty list means "use defaults".
+            return ["pdf", "docx"]
+        return v
+
+    @model_validator(mode="after")
+    def validate_report_ids_match_formats(self) -> "ReportJobsPayload":
+        if self.report_ids is None:
+            return self
+        requested = set(self.formats_requested)
+        provided = set(self.report_ids.keys())
+        if requested != provided:
+            raise ValueError(
+                "report_ids keys must exactly match formats_requested when report_ids is provided."
+            )
+        return self
 
 
 # ── Envelope builder helper ────────────────────────────────────────────────
