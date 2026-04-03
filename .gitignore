@@ -68,3 +68,8 @@ logs/
 node_modules/
 
 infra/subfinder-config/provider-config.yaml
+.gitnexus
+
+# Claude Code specific files
+AGENTS.md
+CLAUDE.md
