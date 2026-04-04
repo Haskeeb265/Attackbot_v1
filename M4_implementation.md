@@ -46,7 +46,7 @@ Rule for progression: each chunk must pass its own checks before the next chunk 
 
 M4 Incremental Delivery Plan (Verifiable Chunks)
 Summary
-Implement M4 in gated vertical slices so each slice is independently runnable and testable before moving on. Keep M3 stable by isolating high-risk changes early (ISS-009), then layering contracts, schema, reporter internals, and finally full integration/E2E. Use Gate 0-3 as hard stop points.
+Implement M4 in gated vertical slices so each slice is independently runnable and testable before moving on. Keep M3 stable by isolatig high-risk changes early (ISS-009), then layering contracts, schema, reporter internals, and finally full integration/E2E. Use Gate 0-3 as hard stop points.
 
 Chunk Sequence
 Chunk 0: Baseline Lock + Harness Hygiene
