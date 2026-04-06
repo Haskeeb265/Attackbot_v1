@@ -436,6 +436,40 @@ class TestScopeParser:
         result = self.parser.parse([scope])
         assert result[0].value == "https://example.com"
 
+    def test_domain_artifact_tier_label_is_dropped(self):
+        scope = ProgramScope("in_scope", "domain", "Tier 3")
+        result = self.parser.parse([scope])
+        assert result == []
+
+    def test_domain_artifact_id_label_is_dropped(self):
+        scope = ProgramScope("in_scope", "domain", "Id1406825640")
+        result = self.parser.parse([scope])
+        assert result == []
+
+    def test_domain_artifact_mobile_text_label_is_dropped(self):
+        scope = ProgramScope("in_scope", "domain", "com.robinhood.global Android")
+        result = self.parser.parse([scope])
+        assert result == []
+
+    def test_com_robinhood_android_is_retained_as_mobile_app(self):
+        scope = ProgramScope("in_scope", "domain", "com.robinhood.android")
+        result = self.parser.parse([scope])
+        assert len(result) == 1
+        assert result[0].value == "com.robinhood.android"
+        assert result[0].asset_type == "mobile_app"
+
+    def test_valid_controls_are_retained_with_expected_classification(self):
+        scopes = [
+            ProgramScope("in_scope", "domain", "robinhood.com"),
+            ProgramScope("in_scope", "domain", "*.robinhood.com"),
+            ProgramScope("in_scope", "domain", "https://robinhood.com/security"),
+        ]
+        result = self.parser.parse(scopes)
+        assert len(result) == 3
+        assert result[0].asset_type == "domain"
+        assert result[1].asset_type == "wildcard_domain"
+        assert result[2].asset_type == "url"
+
 
 # ---------------------------------------------------------------------------
 # Publisher — failure path

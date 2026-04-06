@@ -1,7 +1,7 @@
 <!-- gitnexus:start -->
 # GitNexus — Code Intelligence
 
-This project is indexed by GitNexus as **Attackbot_v1** (1917 symbols, 6192 relationships, 157 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
+This project is indexed by GitNexus as **Attackbot_v1** (2053 symbols, 6548 relationships, 168 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
 
 > If any GitNexus tool warns the index is stale, run `npx gitnexus analyze` in terminal first.
 
@@ -86,52 +86,6 @@ npx gitnexus analyze --embeddings
 To check whether embeddings exist, inspect `.gitnexus/meta.json` — the `stats.embeddings` field shows the count (0 means no embeddings). **Running analyze without `--embeddings` will delete any previously generated embeddings.**
 
 > Claude Code users: A PostToolUse hook handles this automatically after `git commit` and `git merge`.
-
----
-
-## Session Startup Protocol
-
-At the start of every session, I MUST perform these steps automatically:
-
-### 1. Load Context Skill
-- Confirm `context` skill is loaded (auto-loaded by system)
-- If not loaded, report: "Warning: context skill not available"
-
-### 2. Read Persistent Memory
-- If `.claude/MEMORY.md` exists: READ it immediately
-- This provides: current milestone, completion status, session history, blockers
-- Do NOT wait for user to ask
-
-### 3. Check Task Status
-- Run TaskList to see active/pending tasks
-- Note any tasks marked "in_progress" from previous session
-- Note any blocked tasks and their dependencies
-
-### 4. Verify Evidence Quality
-- Review MEMORY.md "Evidence Quality" section
-- Distinguish between: execution logs > test results > plans > commits
-- Be prepared to ask for evidence, not just plans
-
-### 5. Present State Summary
-Report to user:
-```
-Session loaded. Current state:
-- Milestone: [from MEMORY.md]
-- Status: [completion percentage]
-- Active Tasks: [list in-progress]
-- Blockers: [if any]
-- Evidence of last work: [reference logs/tests]
-
-What should we continue from last time?
-```
-
-### Critical Reminders for Every Session
-- **Scope is enforced at multiple layers** — out-of-scope = hard failure
-- **Docker requires `--no-cache`** — cached images have stale code
-- **Migrations are additive-only** — never modify existing
-- **Report generation must be verified** — look for actual PDF generation, not just "service healthy"
-
----
 
 ## CLI
 

@@ -33,6 +33,9 @@ URL_PATTERN = re.compile(r'^https?://')
 
 # Mobile app bundle identifier (com.example.app or reverse-DNS format)
 MOBILE_BUNDLE_PATTERN = re.compile(r'^[a-zA-Z][a-zA-Z0-9]*(\.[a-zA-Z][a-zA-Z0-9]*){2,}$')
+NUMERIC_ONLY_PATTERN = re.compile(r'^\d+$')
+ID_ARTIFACT_PATTERN = re.compile(r'^id\d+$', re.IGNORECASE)
+TIER_ARTIFACT_PATTERN = re.compile(r'^tier\s*\d+$', re.IGNORECASE)
 
 
 class ScopeParser:
@@ -70,12 +73,32 @@ class ScopeParser:
                 value=value,
             )
 
+        if inferred == "domain" and self._is_domain_artifact(value):
+            log.warning(
+                "scope_domain_artifact_dropped",
+                scope_type=scope.scope_type,
+                value=value,
+            )
+            return None
+
         return ProgramScope(
             scope_type=scope.scope_type,
             asset_type=inferred,
             value=value,
             notes=scope.notes,
         )
+
+    @staticmethod
+    def _is_domain_artifact(value: str) -> bool:
+        if NUMERIC_ONLY_PATTERN.match(value):
+            return True
+        if ID_ARTIFACT_PATTERN.match(value):
+            return True
+        if TIER_ARTIFACT_PATTERN.match(value):
+            return True
+        if any(char.isspace() for char in value):
+            return True
+        return False
 
     def _infer_asset_type(self, value: str) -> str:
         """Best-effort asset type inference from the value string."""

@@ -1,0 +1,358 @@
+{
+  "test_name": "test_hackerone_scrape_scan_report_replay_e2e",
+  "started_at": "2026-04-06T00:58:22.922599+00:00",
+  "config": {
+    "scraper_base": "http://localhost:8001/api/v1",
+    "core_base": "http://localhost:8002/api/v1",
+    "reporter_base": "http://localhost:8003/api/v1",
+    "program_wait_seconds": 420,
+    "scan_wait_seconds_small": 300,
+    "scan_wait_seconds_large": 300,
+    "scan_wait_scope_threshold": 10,
+    "report_wait_seconds": 360,
+    "poll_seconds": 5.0,
+    "strict_mode": false,
+    "allow_findings_fallback": true,
+    "minio_host_port_set": false
+  },
+  "steps": [
+    "2026-04-06T00:58:22.922615+00:00 | Starting full HackerOne pipeline E2E trace",
+    "2026-04-06T00:58:24.023264+00:00 | Service health checks passed for scraper/core_engine/reporter",
+    "2026-04-06T00:58:24.350035+00:00 | Scraper trigger accepted in compatibility mode: status_code=200 status=skipped",
+    "2026-04-06T00:58:24.697907+00:00 | Loaded recent program set with findings from core API: count=1",
+    "2026-04-06T00:58:51.605135+00:00 | Selected scraped program for scan: program_id=05017cf3-58ea-4e1d-a395-fcb7070dc85a handle=robinhood valid_in_scope=25 url_in_scope=1",
+    "2026-04-06T00:58:51.951030+00:00 | Scan queued via core-engine: scan_id=7ee68848-8ba3-4fb6-ab50-24256e2255eb",
+    "2026-04-06T01:03:55.362030+00:00 | Fresh scan did not reach terminal state within timeout; scan_id=7ee68848-8ba3-4fb6-ab50-24256e2255eb timeout=300s",
+    "2026-04-06T01:03:55.689438+00:00 | Using latest terminal scan with findings for selected scraped program: scan_id=a88c183e-c5bb-4bd2-8754-81d2e25ae706",
+    "2026-04-06T01:03:56.024281+00:00 | Findings loaded: count=11 scan_id=a88c183e-c5bb-4bd2-8754-81d2e25ae706",
+    "2026-04-06T01:03:56.024304+00:00 | Replay command set prepared: count=5",
+    "2026-04-06T01:03:57.693525+00:00 | Evidence endpoint sample complete: checked=5 total_items=0",
+    "2026-04-06T01:03:58.124348+00:00 | Reporter accepted generation request for scan_id=a88c183e-c5bb-4bd2-8754-81d2e25ae706",
+    "2026-04-06T01:04:04.744953+00:00 | Download-ready reports: formats=['docx', 'pdf']",
+    "2026-04-06T01:04:04.745210+00:00 | DOCX replay proof unavailable; relying on API-derived replay commands"
+  ],
+  "service_health": {
+    "scraper": {
+      "ok": true,
+      "payload": {
+        "status": "healthy",
+        "service": "scraper",
+        "timestamp": "2026-04-06T00:58:23.276790Z",
+        "version": "1.0.0",
+        "components": {
+          "database": {
+            "status": "healthy",
+            "latency_ms": null,
+            "detail": null
+          },
+          "redis": {
+            "status": "healthy",
+            "latency_ms": null,
+            "detail": null
+          },
+          "rabbitmq": {
+            "status": "healthy",
+            "latency_ms": null,
+            "detail": null
+          },
+          "scheduler": {
+            "status": "healthy",
+            "latency_ms": null,
+            "detail": null
+          },
+          "platform_credentials": {
+            "status": "healthy",
+            "latency_ms": null,
+            "detail": null
+          }
+        }
+      }
+    },
+    "core_engine": {
+      "ok": true,
+      "payload": {
+        "status": "healthy",
+        "service": "core-engine",
+        "timestamp": "2026-04-06T00:58:23.602344Z",
+        "version": "1.0.0",
+        "components": {
+          "database": {
+            "status": "healthy",
+            "latency_ms": null,
+            "detail": null
+          },
+          "rabbitmq": {
+            "status": "healthy",
+            "latency_ms": null,
+            "detail": null
+          },
+          "scraper_api": {
+            "status": "healthy",
+            "latency_ms": null,
+            "detail": null
+          },
+          "storage": {
+            "status": "healthy",
+            "latency_ms": null,
+            "detail": null
+          },
+          "scheduler": {
+            "status": "healthy",
+            "latency_ms": null,
+            "detail": null
+          },
+          "toolchain": {
+            "status": "healthy",
+            "latency_ms": null,
+            "detail": null
+          }
+        }
+      }
+    },
+    "reporter": {
+      "ok": true,
+      "payload": {
+        "status": "degraded",
+        "service": "reporter",
+        "timestamp": "2026-04-06T00:58:23.930352Z",
+        "version": "1.0.0",
+        "components": {
+          "database": {
+            "status": "healthy",
+            "latency_ms": null,
+            "detail": null
+          },
+          "rabbitmq": {
+            "status": "healthy",
+            "latency_ms": null,
+            "detail": null
+          },
+          "storage": {
+            "status": "healthy",
+            "latency_ms": null,
+            "detail": null
+          },
+          "core_engine": {
+            "status": "healthy",
+            "latency_ms": null,
+            "detail": null
+          },
+          "scraper": {
+            "status": "healthy",
+            "latency_ms": null,
+            "detail": null
+          },
+          "scheduler": {
+            "status": "healthy",
+            "latency_ms": null,
+            "detail": null
+          },
+          "attack_graph_engine": {
+            "status": "degraded",
+            "latency_ms": null,
+            "detail": "chain_detail_api_not_yet_available"
+          }
+        }
+      }
+    }
+  },
+  "scrape_trigger": {
+    "status_code": 200,
+    "body": {
+      "status": "skipped",
+      "reason": "lock_held",
+      "platform": "hackerone"
+    },
+    "attempts": [
+      {
+        "attempt": 1,
+        "status_code": 200,
+        "body": {
+          "status": "skipped",
+          "reason": "lock_held",
+          "platform": "hackerone"
+        }
+      }
+    ]
+  },
+  "selected_program": {
+    "program_id": "05017cf3-58ea-4e1d-a395-fcb7070dc85a",
+    "handle": "robinhood",
+    "name": "Robinhood Markets Bounty",
+    "platform": "hackerone",
+    "scope_summary": {
+      "in_scope_total": 25,
+      "valid_in_scope": 25,
+      "url_in_scope": 1,
+      "domain_in_scope": 15,
+      "wildcard_domain_in_scope": 5
+    }
+  },
+  "scan_wait_seconds_used": 300,
+  "scan_start": {
+    "status_code": 200,
+    "body": {
+      "status": "queued",
+      "program_id": "05017cf3-58ea-4e1d-a395-fcb7070dc85a",
+      "scan_id": "7ee68848-8ba3-4fb6-ab50-24256e2255eb"
+    }
+  },
+  "scan_result": {
+    "scan_id": "7ee68848-8ba3-4fb6-ab50-24256e2255eb",
+    "program_id": "05017cf3-58ea-4e1d-a395-fcb7070dc85a",
+    "status": "running",
+    "finding_count": 0,
+    "severity_breakdown": null,
+    "started_at": "2026-04-05T12:57:45.440619+00:00",
+    "completed_at": null,
+    "error_detail": null
+  },
+  "scan_wait_timeout_seconds": 300,
+  "scan_source_outcome": "fallback",
+  "findings_scan_id": "a88c183e-c5bb-4bd2-8754-81d2e25ae706",
+  "findings_count": 11,
+  "findings_fallback_used": true,
+  "replay_commands": [
+    {
+      "finding_id": "9ae11188-03f1-4657-be14-633c90e32143",
+      "title": "Wildcard DNS Configuration - Detection",
+      "severity": "info",
+      "curl_command": "curl -i -sS '3BbW9p14UnI5YWxkqrvGOC0S5ns-3BbW9p14UnI5YWxkqrvGOC0S5ns.nummus.robinhood.com'"
+    },
+    {
+      "finding_id": "d96dc57e-5a01-4353-8b2a-50d6e5608620",
+      "title": "WAF Detection",
+      "severity": "info",
+      "curl_command": "curl -i -sS 'https://www.tradepmr.com'"
+    },
+    {
+      "finding_id": "e6f07146-815a-4da2-b525-571329d2c0d6",
+      "title": "Wildcard DNS Configuration - Detection",
+      "severity": "info",
+      "curl_command": "curl -i -sS '3BbW9p14UnI5YWxkqrvGOC0S5ns-3BbW9p14UnI5YWxkqrvGOC0S5ns.api.robinhood.com'"
+    },
+    {
+      "finding_id": "5d99fb62-4af1-410a-b600-b0ae86968993",
+      "title": "WAF Detection",
+      "severity": "info",
+      "curl_command": "curl -i -sS 'https://api.robinhood.com'"
+    },
+    {
+      "finding_id": "08f67c97-b0e7-493b-9c80-3cad41016a13",
+      "title": "WAF Detection",
+      "severity": "info",
+      "curl_command": "curl -i -sS 'https://minerva.robinhood.com'"
+    }
+  ],
+  "evidence_summary": {
+    "checked_findings": 5,
+    "sample_size": 5,
+    "total_evidence_items": 0,
+    "per_finding": [
+      {
+        "finding_id": "9ae11188-03f1-4657-be14-633c90e32143",
+        "evidence_count": 0
+      },
+      {
+        "finding_id": "d96dc57e-5a01-4353-8b2a-50d6e5608620",
+        "evidence_count": 0
+      },
+      {
+        "finding_id": "e6f07146-815a-4da2-b525-571329d2c0d6",
+        "evidence_count": 0
+      },
+      {
+        "finding_id": "5d99fb62-4af1-410a-b600-b0ae86968993",
+        "evidence_count": 0
+      },
+      {
+        "finding_id": "08f67c97-b0e7-493b-9c80-3cad41016a13",
+        "evidence_count": 0
+      }
+    ]
+  },
+  "report_generate": {
+    "status_code": 202,
+    "body": {
+      "scan_id": "a88c183e-c5bb-4bd2-8754-81d2e25ae706",
+      "enqueued": true,
+      "report_ids": {
+        "pdf": "6e289e47-404c-4655-ab2b-77183b9e5a2f",
+        "docx": "16774afb-7ff3-47f1-936f-d248d3e71371"
+      }
+    }
+  },
+  "report_ids": {
+    "pdf": "6e289e47-404c-4655-ab2b-77183b9e5a2f",
+    "docx": "16774afb-7ff3-47f1-936f-d248d3e71371"
+  },
+  "report_terminal": {
+    "pdf": {
+      "report_id": "6e289e47-404c-4655-ab2b-77183b9e5a2f",
+      "scan_id": "a88c183e-c5bb-4bd2-8754-81d2e25ae706",
+      "program_id": "05017cf3-58ea-4e1d-a395-fcb7070dc85a",
+      "format": "pdf",
+      "status": "completed",
+      "storage_path": "reports/6e289e47-404c-4655-ab2b-77183b9e5a2f/report.pdf",
+      "file_size_bytes": 12997,
+      "error_detail": null,
+      "generated_at": "2026-04-06T01:04:00.577248+00:00",
+      "created_at": "2026-03-29T10:15:29.082382+00:00"
+    },
+    "docx": {
+      "report_id": "16774afb-7ff3-47f1-936f-d248d3e71371",
+      "scan_id": "a88c183e-c5bb-4bd2-8754-81d2e25ae706",
+      "program_id": "05017cf3-58ea-4e1d-a395-fcb7070dc85a",
+      "format": "docx",
+      "status": "completed",
+      "storage_path": "reports/16774afb-7ff3-47f1-936f-d248d3e71371/report.docx",
+      "file_size_bytes": 38715,
+      "error_detail": null,
+      "generated_at": "2026-04-06T01:04:00.782570+00:00",
+      "created_at": "2026-03-29T10:15:29.086827+00:00"
+    }
+  },
+  "downloadable_reports": {
+    "pdf": {
+      "report_id": "6e289e47-404c-4655-ab2b-77183b9e5a2f",
+      "status": "completed",
+      "download_url": "http://minio:9000/reports/reports/6e289e47-404c-4655-ab2b-77183b9e5a2f/report.pdf?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=minioadmin%2F20260406%2Fus-east-1%2Fs3%2Faws4_request&X-Amz-Date=20260406T010404Z&X-Amz-Expires=3600&X-Amz-SignedHeaders=host&X-Amz-Signature=ddb74b5d0d037221b29053d735ceee605b448fbdb854f803201dce711669c195",
+      "expires_in_seconds": 900
+    },
+    "docx": {
+      "report_id": "16774afb-7ff3-47f1-936f-d248d3e71371",
+      "status": "completed",
+      "download_url": "http://minio:9000/reports/reports/16774afb-7ff3-47f1-936f-d248d3e71371/report.docx?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=minioadmin%2F20260406%2Fus-east-1%2Fs3%2Faws4_request&X-Amz-Date=20260406T010405Z&X-Amz-Expires=3600&X-Amz-SignedHeaders=host&X-Amz-Signature=425ca5b19eefd4747f58043e7ba2c0fa1ec0fa4306c9c8f13d31db8d421e4954",
+      "expires_in_seconds": 900
+    }
+  },
+  "download_proof_required": false,
+  "docx_download_url_resolution": {
+    "original": "http://minio:9000/reports/reports/16774afb-7ff3-47f1-936f-d248d3e71371/report.docx?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=minioadmin%2F20260406%2Fus-east-1%2Fs3%2Faws4_request&X-Amz-Date=20260406T010405Z&X-Amz-Expires=3600&X-Amz-SignedHeaders=host&X-Amz-Signature=425ca5b19eefd4747f58043e7ba2c0fa1ec0fa4306c9c8f13d31db8d421e4954",
+    "effective": "http://minio:9000/reports/reports/16774afb-7ff3-47f1-936f-d248d3e71371/report.docx?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=minioadmin%2F20260406%2Fus-east-1%2Fs3%2Faws4_request&X-Amz-Date=20260406T010405Z&X-Amz-Expires=3600&X-Amz-SignedHeaders=host&X-Amz-Signature=425ca5b19eefd4747f58043e7ba2c0fa1ec0fa4306c9c8f13d31db8d421e4954",
+    "rewritten": false,
+    "reason": "minio_host_port_not_configured"
+  },
+  "docx_replay_proof": {
+    "available": false,
+    "required": false,
+    "reason": "MINIO_HOST_PORT is not configured for host-side MinIO access."
+  },
+  "result": "passed_with_fallback",
+  "finished_at": "2026-04-06T01:04:04.745220+00:00"
+}
+
+Two things still unchanged from the previous run
+The Wildcard DNS curl commands are still scheme-less. The two Wildcard DNS replay commands are still:
+curl -i -sS '3BbW9p14UnI5YWxkqrvGOC0S5ns-...nummus.robinhood.com'
+curl -i -sS '3BbW9p14UnI5YWxkqrvGOC0S5ns-...api.robinhood.com'
+Phase 3 of the fix plan (URL normalization in reproduction.py) hasn't landed yet. These E2E replay commands are generated by the test harness from finding metadata, not by the reporter — so the reporter-side fix won't change these. The E2E harness itself needs to apply _canonicalize_url before writing replay commands to the trace JSON. This is a separate touch point from the reporter fix.
+File sizes are identical to the previous run — PDF is 12,997 bytes, DOCX is 38,715 bytes, same generated_at timestamps from March 29. The report was not regenerated from scratch; the reporter returned the already-completed artifact from the existing row. This is correct behavior — create_or_reset_report with the same scan_id and format returns the existing completed report ID, and generation is skipped because it's already completed. If you want to verify the Phase 1 description fixes actually appear in the report content, you need to either delete the existing report rows and regenerate, or use a different scan as the findings source.
+The one structural note
+The scan 7ee68848 has now appeared as status: running in two consecutive runs — the April 5 run and this April 6 run — with started_at: 2026-04-05T12:57:45. That scan has been running for over 12 hours. The watchdog in core_engine/watchdog.py should have marked it failed_internal after 2 hours. Either the watchdog isn't firing, the scan has somehow completed and the E2E is reading stale data, or the scan row is in a state the watchdog doesn't catch. Worth checking directly:
+sqlSELECT scan_id, status, started_at, completed_at, error_detail 
+FROM scans 
+WHERE scan_id = '7ee68848-8ba3-4fb6-ab50-24256e2255eb';
+If it's still running after 12+ hours that's a watchdog bug, not an E2E issue — but it should be diagnosed before it accumulates more stuck scans.
+Summary
+The plan's Phase 4 changes are correctly implemented. Phase 3 (URL normalization) is not yet reflected in the E2E replay commands, and the report content fixes from Phase 1 can't be verified without forcing a fresh report generation. The passed_with_fallback outcome label, environment-conditional download proof, and scan_source_outcome tracing are all working exactly as designed.

@@ -36,6 +36,17 @@ def test_build_pack_is_deterministic_for_query_order() -> None:
     assert pack.is_fallback is False
 
 
+def test_build_pack_normalizes_scheme_less_hostname_for_curl_and_raw_http() -> None:
+    host = "3BbW9p14UnI5YWxkqrvGOC0S5ns.api.robinhood.com"
+    finding = _finding(affected_url=host, affected_parameter=None)
+    pack = build_pack(finding)
+
+    assert f"'https://{host}/'" in pack.curl_command
+    assert "GET / HTTP/1.1" in pack.http_request_raw
+    assert f"Host: {host}" in pack.http_request_raw
+    assert f"Navigate to https://{host}/." in pack.browser_steps
+
+
 def test_build_fallback_pack_contains_required_marker() -> None:
     finding = _finding()
     pack = build_fallback_pack(finding, "boom")

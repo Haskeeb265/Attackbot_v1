@@ -134,3 +134,57 @@ def test_findings_are_sorted_by_severity_then_title() -> None:
 
     assert parsed.findings[0].title == "A critical"
     assert parsed.findings[1].title == "B low"
+
+
+def _finding_payload(**overrides) -> dict:
+    payload = {
+        "finding_id": str(uuid4()),
+        "title": "Template finding",
+        "vulnerability_type": "misc",
+        "severity": "info",
+        "affected_url": "https://example.com",
+        "description": None,
+        "raw_output": {},
+    }
+    payload.update(overrides)
+    return payload
+
+
+def test_finding_description_prefers_non_blank_description_field() -> None:
+    finding = ParsedScanBuilder._build_finding(
+        _finding_payload(
+            description=" Top level description ",
+            raw_output={"info": {"description": "scanner desc", "details": "scanner details"}},
+        )
+    )
+    assert finding.description == "Top level description"
+
+
+def test_finding_description_falls_back_to_raw_info_description() -> None:
+    finding = ParsedScanBuilder._build_finding(
+        _finding_payload(
+            description="   ",
+            raw_output={"info": {"description": " Nuclei description ", "details": "scanner details"}},
+        )
+    )
+    assert finding.description == "Nuclei description"
+
+
+def test_finding_description_falls_back_to_raw_info_details() -> None:
+    finding = ParsedScanBuilder._build_finding(
+        _finding_payload(
+            description="",
+            raw_output={"info": {"description": "   ", "details": " Nuclei details text "}},
+        )
+    )
+    assert finding.description == "Nuclei details text"
+
+
+def test_finding_description_uses_default_when_all_values_blank() -> None:
+    finding = ParsedScanBuilder._build_finding(
+        _finding_payload(
+            description="   ",
+            raw_output={"info": {"description": "", "details": "   "}},
+        )
+    )
+    assert finding.description == "No scanner description provided."

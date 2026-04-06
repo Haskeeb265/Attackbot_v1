@@ -66,3 +66,4 @@ logs/
 
 # Build artifacts
 node_modules/
+.gitnexus

@@ -380,7 +380,8 @@ async def get_findings(scan_id: str) -> JSONResponse:
             text("""
                 SELECT finding_id, vulnerability_type, title, severity,
                        cvss_score, affected_url, affected_parameter,
-                       is_verified, source, created_at
+                       is_verified, source, created_at,
+                       description, reproduction_steps, raw_output
                 FROM findings WHERE scan_id = :scan_id
                 ORDER BY cvss_score DESC NULLS LAST
             """),
@@ -398,6 +399,9 @@ async def get_findings(scan_id: str) -> JSONResponse:
                 "is_verified": r[7],
                 "source": r[8],
                 "created_at": r[9].isoformat() if r[9] else None,
+                "description": r[10],
+                "reproduction_steps": r[11],
+                "raw_output": r[12],
             }
             for r in rows.fetchall()
         ]

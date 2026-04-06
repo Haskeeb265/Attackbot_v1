@@ -1,7 +1,9 @@
 {
   "permissions": {
     "allow": [
-      "Bash(gitnexus:*)"
+      "Bash(gitnexus:*)",
+      "Bash(npx:*)",
+      "Bash(takeown:*)"
     ]
   }
 }

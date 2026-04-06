@@ -1,0 +1,327 @@
+{
+  "test_name": "test_hackerone_scrape_scan_report_replay_e2e",
+  "started_at": "2026-04-05T13:39:12.435542+00:00",
+  "config": {
+    "scraper_base": "http://localhost:8001/api/v1",
+    "core_base": "http://localhost:8002/api/v1",
+    "reporter_base": "http://localhost:8003/api/v1",
+    "program_wait_seconds": 420,
+    "scan_wait_seconds": 300,
+    "report_wait_seconds": 360,
+    "poll_seconds": 5.0
+  },
+  "steps": [
+    "2026-04-05T13:39:12.435561+00:00 | Starting full HackerOne pipeline E2E trace",
+    "2026-04-05T13:39:14.011934+00:00 | Service health checks passed for scraper/core_engine/reporter",
+    "2026-04-05T13:39:14.510387+00:00 | Scraper trigger accepted in compatibility mode: status_code=200 status=skipped",
+    "2026-04-05T13:39:15.047001+00:00 | Loaded recent program set with findings from core API: count=1",
+    "2026-04-05T13:39:59.533917+00:00 | Selected scraped program for scan: program_id=05017cf3-58ea-4e1d-a395-fcb7070dc85a handle=robinhood valid_in_scope=25 url_in_scope=1",
+    "2026-04-05T13:40:00.177558+00:00 | Scan queued via core-engine: scan_id=7ee68848-8ba3-4fb6-ab50-24256e2255eb",
+    "2026-04-05T13:45:05.092992+00:00 | Fresh scan did not reach terminal state within timeout; scan_id=7ee68848-8ba3-4fb6-ab50-24256e2255eb timeout=300s",
+    "2026-04-05T13:45:05.804830+00:00 | Using latest terminal scan with findings for selected scraped program: scan_id=a88c183e-c5bb-4bd2-8754-81d2e25ae706",
+    "2026-04-05T13:45:06.656568+00:00 | Findings loaded: count=11 scan_id=a88c183e-c5bb-4bd2-8754-81d2e25ae706",
+    "2026-04-05T13:45:06.656685+00:00 | Replay command set prepared: count=5",
+    "2026-04-05T13:45:10.823058+00:00 | Evidence endpoint sample complete: checked=5 total_items=0",
+    "2026-04-05T13:45:11.706510+00:00 | Reporter accepted generation request for scan_id=a88c183e-c5bb-4bd2-8754-81d2e25ae706",
+    "2026-04-05T13:45:20.238221+00:00 | Download-ready reports: formats=['docx', 'pdf']",
+    "2026-04-05T13:45:23.577786+00:00 | DOCX replay proof unavailable; relying on API-derived replay commands"
+  ],
+  "service_health": {
+    "scraper": {
+      "ok": true,
+      "payload": {
+        "status": "healthy",
+        "service": "scraper",
+        "timestamp": "2026-04-05T13:39:12.931974Z",
+        "version": "1.0.0",
+        "components": {
+          "database": {
+            "status": "healthy",
+            "latency_ms": null,
+            "detail": null
+          },
+          "redis": {
+            "status": "healthy",
+            "latency_ms": null,
+            "detail": null
+          },
+          "rabbitmq": {
+            "status": "healthy",
+            "latency_ms": null,
+            "detail": null
+          },
+          "scheduler": {
+            "status": "healthy",
+            "latency_ms": null,
+            "detail": null
+          },
+          "platform_credentials": {
+            "status": "healthy",
+            "latency_ms": null,
+            "detail": null
+          }
+        }
+      }
+    },
+    "core_engine": {
+      "ok": true,
+      "payload": {
+        "status": "healthy",
+        "service": "core-engine",
+        "timestamp": "2026-04-05T13:39:13.408463Z",
+        "version": "1.0.0",
+        "components": {
+          "database": {
+            "status": "healthy",
+            "latency_ms": null,
+            "detail": null
+          },
+          "rabbitmq": {
+            "status": "healthy",
+            "latency_ms": null,
+            "detail": null
+          },
+          "scraper_api": {
+            "status": "healthy",
+            "latency_ms": null,
+            "detail": null
+          },
+          "storage": {
+            "status": "healthy",
+            "latency_ms": null,
+            "detail": null
+          },
+          "scheduler": {
+            "status": "healthy",
+            "latency_ms": null,
+            "detail": null
+          },
+          "toolchain": {
+            "status": "healthy",
+            "latency_ms": null,
+            "detail": null
+          }
+        }
+      }
+    },
+    "reporter": {
+      "ok": true,
+      "payload": {
+        "status": "degraded",
+        "service": "reporter",
+        "timestamp": "2026-04-05T13:39:13.890176Z",
+        "version": "1.0.0",
+        "components": {
+          "database": {
+            "status": "healthy",
+            "latency_ms": null,
+            "detail": null
+          },
+          "rabbitmq": {
+            "status": "healthy",
+            "latency_ms": null,
+            "detail": null
+          },
+          "storage": {
+            "status": "healthy",
+            "latency_ms": null,
+            "detail": null
+          },
+          "core_engine": {
+            "status": "healthy",
+            "latency_ms": null,
+            "detail": null
+          },
+          "scraper": {
+            "status": "healthy",
+            "latency_ms": null,
+            "detail": null
+          },
+          "scheduler": {
+            "status": "healthy",
+            "latency_ms": null,
+            "detail": null
+          },
+          "attack_graph_engine": {
+            "status": "degraded",
+            "latency_ms": null,
+            "detail": "chain_detail_api_not_yet_available"
+          }
+        }
+      }
+    }
+  },
+  "scrape_trigger": {
+    "status_code": 200,
+    "body": {
+      "status": "skipped",
+      "reason": "lock_held",
+      "platform": "hackerone"
+    },
+    "attempts": [
+      {
+        "attempt": 1,
+        "status_code": 200,
+        "body": {
+          "status": "skipped",
+          "reason": "lock_held",
+          "platform": "hackerone"
+        }
+      }
+    ]
+  },
+  "selected_program": {
+    "program_id": "05017cf3-58ea-4e1d-a395-fcb7070dc85a",
+    "handle": "robinhood",
+    "name": "Robinhood Markets Bounty",
+    "platform": "hackerone",
+    "scope_summary": {
+      "in_scope_total": 25,
+      "valid_in_scope": 25,
+      "url_in_scope": 1,
+      "domain_in_scope": 15,
+      "wildcard_domain_in_scope": 5
+    }
+  },
+  "scan_start": {
+    "status_code": 200,
+    "body": {
+      "status": "queued",
+      "program_id": "05017cf3-58ea-4e1d-a395-fcb7070dc85a",
+      "scan_id": "7ee68848-8ba3-4fb6-ab50-24256e2255eb"
+    }
+  },
+  "scan_result": {
+    "scan_id": "7ee68848-8ba3-4fb6-ab50-24256e2255eb",
+    "program_id": "05017cf3-58ea-4e1d-a395-fcb7070dc85a",
+    "status": "running",
+    "finding_count": 0,
+    "severity_breakdown": null,
+    "started_at": "2026-04-05T12:57:45.440619+00:00",
+    "completed_at": null,
+    "error_detail": null
+  },
+  "scan_wait_timeout_seconds": 300,
+  "findings_scan_id": "a88c183e-c5bb-4bd2-8754-81d2e25ae706",
+  "findings_count": 11,
+  "findings_fallback_used": true,
+  "replay_commands": [
+    {
+      "finding_id": "9ae11188-03f1-4657-be14-633c90e32143",
+      "title": "Wildcard DNS Configuration - Detection",
+      "severity": "info",
+      "curl_command": "curl -i -sS '3BbW9p14UnI5YWxkqrvGOC0S5ns-3BbW9p14UnI5YWxkqrvGOC0S5ns.nummus.robinhood.com'"
+    },
+    {
+      "finding_id": "d96dc57e-5a01-4353-8b2a-50d6e5608620",
+      "title": "WAF Detection",
+      "severity": "info",
+      "curl_command": "curl -i -sS 'https://www.tradepmr.com'"
+    },
+    {
+      "finding_id": "e6f07146-815a-4da2-b525-571329d2c0d6",
+      "title": "Wildcard DNS Configuration - Detection",
+      "severity": "info",
+      "curl_command": "curl -i -sS '3BbW9p14UnI5YWxkqrvGOC0S5ns-3BbW9p14UnI5YWxkqrvGOC0S5ns.api.robinhood.com'"
+    },
+    {
+      "finding_id": "5d99fb62-4af1-410a-b600-b0ae86968993",
+      "title": "WAF Detection",
+      "severity": "info",
+      "curl_command": "curl -i -sS 'https://api.robinhood.com'"
+    },
+    {
+      "finding_id": "08f67c97-b0e7-493b-9c80-3cad41016a13",
+      "title": "WAF Detection",
+      "severity": "info",
+      "curl_command": "curl -i -sS 'https://minerva.robinhood.com'"
+    }
+  ],
+  "evidence_summary": {
+    "checked_findings": 5,
+    "sample_size": 5,
+    "total_evidence_items": 0,
+    "per_finding": [
+      {
+        "finding_id": "9ae11188-03f1-4657-be14-633c90e32143",
+        "evidence_count": 0
+      },
+      {
+        "finding_id": "d96dc57e-5a01-4353-8b2a-50d6e5608620",
+        "evidence_count": 0
+      },
+      {
+        "finding_id": "e6f07146-815a-4da2-b525-571329d2c0d6",
+        "evidence_count": 0
+      },
+      {
+        "finding_id": "5d99fb62-4af1-410a-b600-b0ae86968993",
+        "evidence_count": 0
+      },
+      {
+        "finding_id": "08f67c97-b0e7-493b-9c80-3cad41016a13",
+        "evidence_count": 0
+      }
+    ]
+  },
+  "report_generate": {
+    "status_code": 202,
+    "body": {
+      "scan_id": "a88c183e-c5bb-4bd2-8754-81d2e25ae706",
+      "enqueued": true,
+      "report_ids": {
+        "pdf": "6e289e47-404c-4655-ab2b-77183b9e5a2f",
+        "docx": "16774afb-7ff3-47f1-936f-d248d3e71371"
+      }
+    }
+  },
+  "report_ids": {
+    "pdf": "6e289e47-404c-4655-ab2b-77183b9e5a2f",
+    "docx": "16774afb-7ff3-47f1-936f-d248d3e71371"
+  },
+  "report_terminal": {
+    "pdf": {
+      "report_id": "6e289e47-404c-4655-ab2b-77183b9e5a2f",
+      "scan_id": "a88c183e-c5bb-4bd2-8754-81d2e25ae706",
+      "program_id": "05017cf3-58ea-4e1d-a395-fcb7070dc85a",
+      "format": "pdf",
+      "status": "completed",
+      "storage_path": "reports/6e289e47-404c-4655-ab2b-77183b9e5a2f/report.pdf",
+      "file_size_bytes": 12997,
+      "error_detail": null,
+      "generated_at": "2026-04-05T13:45:16.389938+00:00",
+      "created_at": "2026-03-29T10:15:29.082382+00:00"
+    },
+    "docx": {
+      "report_id": "16774afb-7ff3-47f1-936f-d248d3e71371",
+      "scan_id": "a88c183e-c5bb-4bd2-8754-81d2e25ae706",
+      "program_id": "05017cf3-58ea-4e1d-a395-fcb7070dc85a",
+      "format": "docx",
+      "status": "completed",
+      "storage_path": "reports/16774afb-7ff3-47f1-936f-d248d3e71371/report.docx",
+      "file_size_bytes": 38715,
+      "error_detail": null,
+      "generated_at": "2026-04-05T13:45:16.727242+00:00",
+      "created_at": "2026-03-29T10:15:29.086827+00:00"
+    }
+  },
+  "downloadable_reports": {
+    "pdf": {
+      "report_id": "6e289e47-404c-4655-ab2b-77183b9e5a2f",
+      "status": "completed",
+      "download_url": "http://minio:9000/reports/reports/6e289e47-404c-4655-ab2b-77183b9e5a2f/report.pdf?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=minioadmin%2F20260405%2Fus-east-1%2Fs3%2Faws4_request&X-Amz-Date=20260405T134520Z&X-Amz-Expires=3600&X-Amz-SignedHeaders=host&X-Amz-Signature=14bc98e3b07568f8ac9ab3dd18d6ca99137cfba1f4ac7176560c334c34a90627",
+      "expires_in_seconds": 900
+    },
+    "docx": {
+      "report_id": "16774afb-7ff3-47f1-936f-d248d3e71371",
+      "status": "completed",
+      "download_url": "http://minio:9000/reports/reports/16774afb-7ff3-47f1-936f-d248d3e71371/report.docx?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=minioadmin%2F20260405%2Fus-east-1%2Fs3%2Faws4_request&X-Amz-Date=20260405T134521Z&X-Amz-Expires=3600&X-Amz-SignedHeaders=host&X-Amz-Signature=491ee70e363647313a1af53e56894f4006bd32c7032cae98434df5e5daf0f611",
+      "expires_in_seconds": 900
+    }
+  },
+  "docx_replay_proof": {
+    "error": "ConnectError: [Errno 11001] getaddrinfo failed"
+  },
+  "result": "passed",
+  "finished_at": "2026-04-05T13:45:23.577810+00:00"
+}

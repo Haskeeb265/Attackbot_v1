@@ -26,6 +26,16 @@ _SEVERITY_RANK: dict[str, int] = {
 }
 
 
+def _first_non_blank_text(*values: Any) -> str | None:
+    for value in values:
+        if value is None:
+            continue
+        text = str(value).strip()
+        if text:
+            return text
+    return None
+
+
 def _normalize_severity_key(key: str) -> str:
     return _SEVERITY_ALIASES.get(key.lower(), key.lower())
 
@@ -123,6 +133,13 @@ class ParsedScanBuilder:
         severity = _normalize_severity_key(str(item.get("severity") or "info"))
         if severity not in _SEVERITY_RANK:
             severity = "info"
+        raw_output = item.get("raw_output")
+        info = raw_output.get("info", {}) if isinstance(raw_output, dict) else {}
+        description = _first_non_blank_text(
+            item.get("description"),
+            info.get("description"),
+            info.get("details"),
+        ) or "No scanner description provided."
 
         return ParsedFinding(
             finding_id=UUID(str(item["finding_id"])),
@@ -133,9 +150,9 @@ class ParsedScanBuilder:
             cvss_vector=item.get("cvss_vector"),
             affected_url=str(item.get("affected_url") or ""),
             affected_parameter=item.get("affected_parameter"),
-            description=str(item.get("description") or ""),
+            description=description,
             reproduction_steps=item.get("reproduction_steps"),
             source=item.get("source"),
             is_verified=bool(item.get("is_verified", False)),
-            raw_output=item.get("raw_output"),
+            raw_output=raw_output,
         )

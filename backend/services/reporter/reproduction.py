@@ -67,9 +67,20 @@ def build_fallback_pack(finding: ParsedFinding, reason: str) -> ReproductionPack
 
 
 def _canonicalize_url(raw_url: str) -> str:
-    split = urlsplit(raw_url)
+    split = urlsplit(_with_default_scheme(raw_url))
+    path = split.path or "/"
     sorted_query = urlencode(sorted(parse_qsl(split.query, keep_blank_values=True)))
-    return urlunsplit((split.scheme, split.netloc, split.path, sorted_query, split.fragment))
+    return urlunsplit((split.scheme, split.netloc, path, sorted_query, split.fragment))
+
+
+def _with_default_scheme(raw_url: str) -> str:
+    value = (raw_url or "").strip()
+    if not value:
+        return "https://unknown.invalid/"
+    split = urlsplit(value)
+    if split.scheme:
+        return value
+    return f"https://{value.lstrip('/')}"
 
 
 def _build_curl_command(url: str, finding: ParsedFinding) -> str:
