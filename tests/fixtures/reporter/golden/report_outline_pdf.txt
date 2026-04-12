@@ -1,6 +1,0 @@
-AttackBot Security Report
-Executive Summary
-Findings Table
-Severity | Verification Status | Title | Affected URL
-high | unverified | Stored XSS | https://example.com/app
-Appendix - Raw HTTP Requests

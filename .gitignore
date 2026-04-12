@@ -67,3 +67,6 @@ logs/
 # Build artifacts
 node_modules/
 .gitnexus
+.claude
+AGENTS.md
+CLAUDE.md

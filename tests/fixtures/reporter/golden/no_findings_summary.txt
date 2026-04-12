@@ -1,1 +1,0 @@
-No findings were produced for this scan. This report reflects the completed scan state and the scope reviewed at generation time. It should not be interpreted as proof of absence of vulnerabilities beyond the tested coverage captured below.
