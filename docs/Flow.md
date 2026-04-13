@@ -93,7 +93,7 @@ When the Scraper service starts up, it registers two background jobs that run on
 
 You can manually tell the Scraper to go fetch programs right now:
 - `POST /api/v1/scrape/trigger?platform=hackerone` — immediately runs the HackerOne scrape, outside the normal schedule.
-- `POST /api/v1/scrape/publish-batch?batch_size=10` — immediately checks for programs due for scanning and publishes up to 10 scan jobs.
+- `POST /api/v1/scan-jobs/trigger?batch_size=10` — immediately checks for programs due for scanning and publishes up to 10 scan jobs.
 
 **Code:** `backend/services/scraper/main.py` → `trigger_scrape()` and `trigger_scan_publish_batch()`.
 
@@ -1050,10 +1050,10 @@ AttackBot includes a complete observability stack defined in `infra/docker-compo
 
 | Migration | Tables Created | Purpose |
 |-----------|---------------|---------|
-| `001_programs.py` | `programs`, `program_scopes`, `program_policies` | Store bug bounty program metadata (M2) |
-| `002_scans.py` | `scans`, `findings`, `assets`, `endpoints` | Store scan results and discoveries (M3) |
-| `003_browser_sessions.py` | `browser_sessions` | Store encrypted authenticated sessions (M5, planned) |
-| `004_reporter.py` | `reports`, `reproduction_packs` | Store report generation metadata and reproduction materials (M4) |
+| `001_initial_schema.py` | `programs`, `scans` | Initial proof-of-life schema (M1) |
+| `002_scraper_full.py` | `programs` (extended), `program_scopes`, `program_policies` | Scraper data model (M2) |
+| `003_engine.py` | `scans` (extended), `scan_stages`, `assets`, `endpoints`, `js_assets`, `findings`, `finding_evidence`, `vulnerability_groups` | Core engine schema (M3) |
+| `004_reporter.py` | `reports`, `reproduction_packs` | Reporter schema (M4) |
 
 ---
 

@@ -1,6 +1,6 @@
 # AttackBot — Current Issues
 
-> Last updated: 2026-03-20
+> Last updated: 2026-04-13
 > Scope: Issues identified during milestone audit against M1–M3, `docs/Flow.md`, and `docs/Architecture.md`.
 
 | ID | Issue | Impact | Status | Location | Suggested Fix | Milestone |
@@ -13,4 +13,4 @@
 | ISS-006 | Manual scan API payload mismatches M3 docs | `POST /api/v1/scans/start` returns 422 unless full `ScanJobsPayload` is provided | Closed | `backend/services/core_engine/main.py`, `docs/Milestones/M3_FirstStrike.md` | Align docs with current schema or accept a minimal body and build payload server-side | M3 |
 | ISS-007 | Integration test path mismatch | Docs reference `tests/integration`, but repo uses `tests/integrations` | Fixed | `tests/integrations/test_engine_pipeline.py`, `docs/Milestones/M3_FirstStrike.md` | Rename folder or update docs/commands | M3 |
 | ISS-008 | Architecture says only `api-gateway` is public, compose exposes more | Documentation drift for deployment model | Closed | `docs/Architecture.md`, `infra/docker-compose.yml` | Document dev exposure or add a prod-only compose profile | M1 / M10 |
-| ISS-009 | Scraper `/api/v1/scrape/trigger` repeatedly times out during E2E runs | Live inventory refresh is stale at run start; pinned scans may use older scope metadata | Open | `backend/services/scraper/main.py`, `tests/integrations/test_e2e_system_trace.py` | Investigate long-running scrape trigger path, split async/background processing, and add timeout-safe progress response | M4 |
+| ISS-009 | Scraper `/api/v1/scrape/trigger` repeatedly times out during E2E runs | Live inventory refresh could go stale at run start | Closed | `backend/services/scraper/main.py`, `tests/integrations/test_e2e_system_trace.py` | Trigger moved to background (`202 accepted`) with polling-oriented tests | M4 |

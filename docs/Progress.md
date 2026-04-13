@@ -1,6 +1,6 @@
 # AttackBot — Project Progress
 
-> Last updated: 2026-04-04
+> Last updated: 2026-04-13
 > Current state: **M4 COMPLETE** — PDF/DOCX generation implemented, Gates 2 & 3 verified
 > Reporter service: Fully operational with 75% test coverage
 
@@ -107,7 +107,7 @@
 ### Scraper API Routes (implemented)
 ```
 POST /api/v1/scrape/trigger — trigger immediate scrape for a platform
-POST /api/v1/scrape/publish-batch — trigger bounded background publish batch for due programs
+POST /api/v1/scan-jobs/trigger — trigger bounded background publish batch for due programs
 GET /api/v1/programs — paginated program listing with filters
 GET /api/v1/programs/{program_id} — single program detail
 GET /api/v1/programs/{program_id}/scope — scope entries for a program

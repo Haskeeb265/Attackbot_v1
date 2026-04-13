@@ -32,7 +32,7 @@ Six phases execute sequentially via `depends_on` + `healthcheck` conditions:
 
 | Service | Port | Notes |
 |---------|------|-------|
-| api-gateway | 8000 | Single external entry point |
+| api-gateway | 8000 | Health aggregator (routing/auth planned for M10) |
 | scraper | 8001 | Internal only |
 | core-engine | 8002 | Internal only |
 | reporter | 8003 | Internal only |
@@ -43,9 +43,8 @@ Six phases execute sequentially via `depends_on` + `healthcheck` conditions:
 ## Triggering a Manual Scan
 
 ```bash
-# Via API Gateway (M2+ required)
-curl -X POST http://localhost:8000/scraper/api/v1/scrape/trigger \
-  -H "X-API-Key: <your-key>"
+# Direct to Scraper API
+curl -X POST "http://localhost:8001/api/v1/scrape/trigger?platform=hackerone"
 ```
 
 ## Inspecting the DLQ
@@ -57,11 +56,7 @@ curl http://localhost:8002/api/v1/queue/dlq/inspect
 
 ## Replaying a DLQ Message
 
-```bash
-curl -X POST http://localhost:8002/api/v1/queue/dlq/replay \
-  -H "Content-Type: application/json" \
-  -d '{"event_id": "<message-event-id>"}'
-```
+DLQ replay API is not implemented yet in the current codebase.
 
 ## Adding a New Platform Collector (M2+)
 

@@ -135,7 +135,7 @@ Scope enforcement is applied **multiple times** across layers:
 
 | # | Service | Port | Type | Responsibility |
 |---|---|---|---|---|
-| 1 | `api-gateway` | 8000 | FastAPI | External entry point, routing, auth |
+| 1 | `api-gateway` | 8000 | FastAPI | Health aggregator (routing/auth planned for M10) |
 | 2 | `scraper` | 8001 | FastAPI + APScheduler | Platform scraping and scan publishing |
 | 3 | `core-engine` | 8002 | FastAPI + Celery | Scan orchestration |
 | 4 | `core-worker` | internal | Celery Worker | Pipeline execution |
@@ -542,9 +542,7 @@ created_at          TIMESTAMPTZ
 ```
 BaseCollector
 ├── HackerOneCollector
-├── BugCrowdCollector
-├── IntigritiCollector
-└── YesWeHackCollector
+└── (additional collectors planned)
 ```
 
 **Key APIs:**
@@ -848,7 +846,7 @@ Scraper
 | 001 | `001_initial_schema.py` | programs, scans (proof of life) | ✅ Applied |
 | 002 | `002_scraper_full.py` | programs (full), program_scopes, program_policies | ✅ Applied |
 | 003 | `003_engine.py` | scans (extended), scan_stages, assets, endpoints, js_assets, findings, finding_evidence, vulnerability_groups | ✅ Applied |
-| 004 | — | reports, reproduction_packs | 🔲 Planned (M4) |
+| 004 | `004_reporter.py` | reports, reproduction_packs | ✅ Applied |
 | 005 | — | browser_sessions | 🔲 Planned (M5) |
 | 006 | — | api_schemas | 🔲 Planned (M6) |
 | 007 | — | finding_evidence (extended) | 🔲 Planned (M7) |
@@ -900,7 +898,6 @@ Phase 6 — Gateway
 
 ```
 GET  /api/v1/queue/dlq/inspect
-POST /api/v1/queue/dlq/replay
 ```
 
 > DLQ alerts triggered after **10 messages**.

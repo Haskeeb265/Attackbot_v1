@@ -407,7 +407,7 @@ GET  /api/v1/scans/{scan_id}/findings
 - No trailing slashes
 - Resource names are plural nouns: `/programs`, `/scans`, `/findings`, `/reports`
 - Sub-resources use nesting: `/scans/{scan_id}/findings` not `/findings?scan_id=...`
-- Actions that aren't CRUD use a verb: `/scrape/trigger`, `/queue/dlq/replay`
+- Actions that aren't CRUD use a verb: `/scrape/trigger`, `/scan-jobs/trigger`
 
 ---
 
