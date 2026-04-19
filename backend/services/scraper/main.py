@@ -14,16 +14,16 @@ PITFALL: The collector uses synchronous `requests`. Always run via
 `loop.run_in_executor(None, fn)` — never call directly in async context.
 """
 
-import asyncio
-from contextlib import asynccontextmanager
-from datetime import datetime, timezone
-from uuid import UUID
+import asyncio # this library is used for event loops, coroutines, and non-blocking I/O operations in Python. It allows for concurrent programming and is essential for the asynchronous operations in this scraper service.
+from contextlib import asynccontextmanager # this libray is used for setting up an async context manager, which is utilized in the lifespan of the FastAPI application to manage resources like database connections, Redis clients, and schedulers. It ensures that these resources are properly initialized when the application starts and cleaned up when it shuts down.
+from datetime import datetime, timezone # i know
+from uuid import UUID # i know
 
-import redis.asyncio as aioredis
-from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from fastapi import BackgroundTasks, FastAPI, HTTPException, Query
+import redis.asyncio as aioredis # this is used for async redis client. it lets the scraper service interact with Redis for distributed locking and other operations without blocking the event loop, which is crucial for maintaining responsiveness in an async application.
+from apscheduler.schedulers.asyncio import AsyncIOScheduler # this library is used for scheduling tasks in an asynchronous context. In this scraper service, it is used to schedule periodic scraping of platforms and reconciliation tasks without blocking the main application thread, allowing for efficient background processing. Similar to a cron job scheduler but designed for async applications.
+from fastapi import BackgroundTasks, FastAPI, HTTPException, Query # this libraby is used for building the web API of the scraper service. FastAPI is a modern, fast web framework for building APIs with Python. BackgroundTasks allows for running tasks in the background without blocking the request-response cycle. HTTPException is used for handling errors and returning appropriate HTTP status codes. Query is used for parsing and validating query parameters in API endpoints.
 
-from backend.services.scraper.collectors import hackerone  # noqa: F401 — triggers registration
+from backend.services.scraper.collectors import hackerone  # noqa: F401 
 from backend.services.scraper.collectors.base import CollectorRegistry
 from backend.services.scraper.config import ScraperConfig
 from backend.services.scraper.models import Program, ProgramScope
