@@ -112,6 +112,13 @@ async def lifespan(app: FastAPI):  # type: ignore[type-arg]
     global _queue_publisher, _storage
 
     log.info("service_starting", service=settings.service_name, port=settings.port)
+    try:
+        from backend.shared.tracing import init_tracing, instrument_httpx
+
+        init_tracing(settings.service_name, settings.jaeger_endpoint)
+        instrument_httpx()
+    except Exception as exc:
+        log.warning("tracing_init_failed", error=str(exc))
     settings.require_fields(
         [
             "database_url",
@@ -159,6 +166,12 @@ async def lifespan(app: FastAPI):  # type: ignore[type-arg]
 
 
 app = FastAPI(title="AttackBot Reporter", version="1.0.0", lifespan=lifespan)
+try:
+    from backend.shared.tracing import instrument_fastapi
+
+    instrument_fastapi(app)
+except Exception as exc:
+    log.warning("tracing_fastapi_instrumentation_failed", error=str(exc))
 Instrumentator().instrument(app).expose(app)
 
 

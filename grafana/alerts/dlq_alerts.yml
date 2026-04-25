@@ -1,0 +1,23 @@
+groups:
+  - name: dlq_alerts
+    interval: 60s
+    rules:
+      - alert: DLQMessagesPresent
+        expr: rabbitmq_dlq_depth > 0
+        for: 5m
+        labels:
+          severity: warning
+          component: messaging
+        annotations:
+          summary: "Dead Letter Queue has messages"
+          description: "DLQ {{ $labels.queue }} has {{ $value }} messages for over 5 minutes"
+      
+      - alert: DLQDepthCritical
+        expr: rabbitmq_dlq_depth > 100
+        for: 1m
+        labels:
+          severity: critical
+          component: messaging
+        annotations:
+          summary: "Dead Letter Queue depth critical"
+          description: "DLQ {{ $labels.queue }} has {{ $value }} messages (critical threshold: 100)"

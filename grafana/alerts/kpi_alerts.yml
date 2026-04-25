@@ -1,0 +1,422 @@
+# AttackBot KPI Alert Rules
+# Version: 1.0
+# Date: 2026-03-29
+# These alerts monitor KPIs defined in docs/Core-Docs/KPIs/KPI_Framework.md
+
+groups:
+  # ===========================================================================
+  # CRITICAL ALERTS - Immediate Action Required
+  # ===========================================================================
+  - name: critical_kpi_alerts
+    interval: 1m
+    rules:
+      # System Health Alerts
+      - alert: ServiceUnhealthy
+        expr: attackbot_sh_002_service_health_status == 0
+        for: 5m
+        labels:
+          severity: critical
+          category: system_health
+          kpi_id: SH-002
+        annotations:
+          summary: "Service {{ $labels.service_name }} is unhealthy"
+          description: "Service {{ $labels.service_name }} has been unhealthy for 5 minutes"
+          impact: "Service outage affecting platform functionality"
+          action: "Investigate and restart service immediately"
+
+      - alert: AllServicesUnhealthy
+        expr: count(attackbot_sh_002_service_health_status == 1) == 0
+        for: 5m
+        labels:
+          severity: critical
+          category: system_health
+          kpi_id: SH-002
+        annotations:
+          summary: "All services are unhealthy"
+          description: "No healthy services detected for 5 minutes"
+          impact: "Complete platform outage"
+          action: "Emergency incident response required"
+
+      # Scan Reliability Alerts
+      - alert: ScanSuccessRateCritical
+        expr: |
+          (sum(attackbot_rl_001_scans_succeeded_total) / sum(attackbot_tp_001_scans_initiated_total)) * 100 < 90
+        for: 1h
+        labels:
+          severity: critical
+          category: reliability
+          kpi_id: RL-001
+        annotations:
+          summary: "Scan success rate below 90%"
+          description: "Scan success rate is {{ $value }}% (threshold: 90%)"
+          impact: "Significant number of scans failing"
+          action: "Investigate scan failures and DLQ messages"
+
+      - alert: ReportGenerationSuccessRateCritical
+        expr: |
+          (sum(attackbot_rl_004_report_generation_success_total) / 
+           sum(attackbot_tp_006_reports_generated_total{status=~"completed|failed"})) * 100 < 95
+        for: 1h
+        labels:
+          severity: critical
+          category: reliability
+          kpi_id: RL-004
+        annotations:
+          summary: "Report generation success rate below 95%"
+          description: "Report generation success rate is {{ $value }}% (threshold: 95%)"
+          impact: "Reports not being generated successfully"
+          action: "Investigate reporter service and storage issues"
+
+      # Database Connection Alerts
+      - alert: DatabaseConnectionErrorsCritical
+        expr: |
+          rate(attackbot_sh_003_database_connection_errors_total[5m]) > 0.01
+        for: 5m
+        labels:
+          severity: critical
+          category: system_health
+          kpi_id: SH-003
+        annotations:
+          summary: "Database connection errors exceeding 1%"
+          description: "Database connection error rate is {{ $value }} (threshold: 1%)"
+          impact: "Database operations failing"
+          action: "Check database health and connection pool"
+
+      # Scan Failure Rate
+      - alert: ScanFailureRateCritical
+        expr: |
+          (sum(rate(attackbot_rl_002_scans_failed_total[1h])) / 
+           sum(rate(attackbot_tp_001_scans_initiated_total[1h]))) * 100 > 10
+        for: 1h
+        labels:
+          severity: critical
+          category: reliability
+          kpi_id: RL-002
+        annotations:
+          summary: "Scan failure rate above 10%"
+          description: "Scan failure rate is {{ $value }}% (threshold: 10%)"
+          impact: "High scan failure rate"
+          action: "Investigate root cause of scan failures"
+
+      # Worker Crash Alert
+      - alert: WorkerCrashRateCritical
+        expr: rate(attackbot_rl_006_worker_crash_total[1h]) > 0.5
+        for: 1h
+        labels:
+          severity: critical
+          category: reliability
+          kpi_id: RL-006
+        annotations:
+          summary: "Worker crash rate above 0.5 per hour"
+          description: "Worker crash rate is {{ $value }} per hour (threshold: 0.5)"
+          impact: "Worker crashes causing message processing failures"
+          action: "Investigate worker stability and memory usage"
+
+      # DLQ Alerts (existing ones enhanced)
+      - alert: DLQMessagesCritical
+        expr: sum(rabbitmq_dlq_depth) > 100
+        for: 1m
+        labels:
+          severity: critical
+          category: messaging
+          kpi_id: RL-008
+        annotations:
+          summary: "Dead Letter Queue depth critical"
+          description: "Total DLQ depth is {{ $value }} (critical threshold: 100)"
+          impact: "Messages stuck in DLQ, not being processed"
+          action: "Investigate DLQ messages and trigger recovery"
+
+  # ===========================================================================
+  # WARNING ALERTS - Monitor and Investigate
+  # ===========================================================================
+  - name: warning_kpi_alerts
+    interval: 5m
+    rules:
+      # Performance Alerts
+      - alert: ScanDurationHigh
+        expr: quantile(0.95, attackbot_pf_002_scan_duration_summary_seconds_sum / attackbot_pf_002_scan_duration_summary_seconds_count) > 3600
+        for: 1h
+        labels:
+          severity: warning
+          category: performance
+          kpi_id: PF-002
+        annotations:
+          summary: "95th percentile scan duration above 1 hour"
+          description: "P95 scan duration is {{ $value }} seconds (threshold: 3600s / 60min)"
+          impact: "Scans taking too long to complete"
+          action: "Investigate pipeline bottlenecks"
+
+      - alert: AverageScanDurationHigh
+        expr: |
+          avg(attackbot_pf_001_scan_duration_seconds_sum) / 
+          avg(attackbot_pf_001_scan_duration_seconds_count) > 1800
+        for: 1h
+        labels:
+          severity: warning
+          category: performance
+          kpi_id: PF-001
+        annotations:
+          summary: "Average scan duration above 30 minutes"
+          description: "Average scan duration is {{ $value }} seconds (threshold: 1800s / 30min)"
+          impact: "Scans taking longer than expected"
+          action: "Review scan pipeline performance"
+
+      # Quality Alerts
+      - alert: VerificationRateLow
+        expr: |
+          (sum(attackbot_ql_001_verified_findings_total) / 
+           sum(attackbot_tp_004_findings_discovered_total)) * 100 < 60
+        for: 24h
+        labels:
+          severity: warning
+          category: quality
+          kpi_id: QL-001
+        annotations:
+          summary: "Verification rate below 60%"
+          description: "Verification rate is {{ $value }}% (threshold: 60%)"
+          impact: "Low verification rate indicates potential quality issues"
+          action: "Review verification process and criteria"
+
+      - alert: FalsePositiveRateHigh
+        expr: |
+          (sum(attackbot_ql_002_false_positive_findings_total) / 
+           sum(attackbot_ql_001_verified_findings_total)) * 100 > 3
+        for: 24h
+        labels:
+          severity: warning
+          category: quality
+          kpi_id: QL-002
+        annotations:
+          summary: "False positive rate above 3%"
+          description: "False positive rate is {{ $value }}% (threshold: 3%)"
+          impact: "High false positive rate reduces report credibility"
+          action: "Review false positive detection logic"
+
+      - alert: CleanScanRateHigh
+        expr: |
+          (sum(attackbot_ql_006_clean_scans_total) / 
+           sum(attackbot_tp_002_scans_completed_total{status="completed"})) * 100 > 40
+        for: 24h
+        labels:
+          severity: warning
+          category: quality
+          kpi_id: QL-006
+        annotations:
+          summary: "Clean scan rate above 40%"
+          description: "Clean scan rate is {{ $value }}% (threshold: 40%)"
+          impact: "High clean scan rate may indicate configuration or targeting issues"
+          action: "Review program scope and scan configuration"
+
+      # Resource Utilization Alerts
+      - alert: CPUUsageHigh
+        expr: node_cpu_utilisation > 0.8
+        for: 15m
+        labels:
+          severity: warning
+          category: resource_utilization
+          kpi_id: RU-001
+        annotations:
+          summary: "CPU usage above 80%"
+          description: "CPU usage is {{ $value }} (threshold: 0.8 / 80%)"
+          impact: "High CPU usage may affect performance"
+          action: "Scale resources or optimize CPU-intensive operations"
+
+      - alert: MemoryUsageHigh
+        expr: node_memory_utilisation > 0.8
+        for: 15m
+        labels:
+          severity: warning
+          category: resource_utilization
+          kpi_id: RU-002
+        annotations:
+          summary: "Memory usage above 80%"
+          description: "Memory usage is {{ $value }} (threshold: 0.8 / 80%)"
+          impact: "High memory usage may cause OOM kills"
+          action: "Scale memory or investigate memory leaks"
+
+      # Retry Rate
+      - alert: RetryRateHigh
+        expr: |
+          rate(attackbot_rl_007_task_retries_total[1h]) / 
+          rate(attackbot_tp_001_scans_initiated_total[1h]) > 0.05
+        for: 1h
+        labels:
+          severity: warning
+          category: reliability
+          kpi_id: RL-007
+        annotations:
+          summary: "Task retry rate above 5%"
+          description: "Retry rate is {{ $value }} (threshold: 0.05 / 5%)"
+          impact: "High retry rate indicates processing issues"
+          action: "Investigate retry causes and fix underlying issues"
+
+      # DLQ Alerts
+      - alert: DLQMessagesPresent
+        expr: sum(rabbitmq_dlq_depth) > 0
+        for: 5m
+        labels:
+          severity: warning
+          category: messaging
+          kpi_id: RL-008
+        annotations:
+          summary: "Dead Letter Queue has messages"
+          description: "DLQ has {{ $value }} messages for over 5 minutes"
+          impact: "Messages in DLQ need investigation"
+          action: "Inspect DLQ and determine recovery action"
+
+      # Resource Alerts
+      - alert: DiskUsageHigh
+        expr: attackbot_ru_003_disk_usage_percentage > 70
+        for: 1h
+        labels:
+          severity: warning
+          category: resource_utilization
+          kpi_id: RU-003
+        annotations:
+          summary: "Disk usage above 70%"
+          description: "Disk usage is {{ $value }}% (threshold: 70%)"
+          impact: "Running out of disk space"
+          action: "Free up disk space or add more storage"
+
+      - alert: DatabaseSizeHigh
+        expr: attackbot_ru_004_database_size_gb > 80
+        for: 1h
+        labels:
+          severity: warning
+          category: resource_utilization
+          kpi_id: RU-004
+        annotations:
+          summary: "Database size above 80 GB"
+          description: "Database size is {{ $value }} GB (threshold: 80 GB)"
+          impact: "Large database size may affect performance"
+          action: "Consider database cleanup or archiving old data"
+
+      # Throughput Alerts
+      - alert: ScansPerHourDrop
+        expr: |
+          rate(attackbot_tp_002_scans_completed_total[1h]) < 
+          0.5 * avg_over_time(rate(attackbot_tp_002_scans_completed_total[1h])[1d:])
+        for: 2h
+        labels:
+          severity: warning
+          category: throughput
+          kpi_id: TP-003
+        annotations:
+          summary: "Scans per hour dropped by more than 50%"
+          description: "Current scan rate is {{ $value }} (50% below daily average)"
+          impact: "Significant drop in scan throughput"
+          action: "Investigate scan pipeline and queue health"
+
+  # ===========================================================================
+  # INFO ALERTS - Track Trends
+  # ===========================================================================
+  - name: info_kpi_alerts
+    interval: 15m
+    rules:
+      - alert: FindingsPerScanDrop
+        expr: |
+          rate(attackbot_tp_004_findings_discovered_total[1h]) / 
+          rate(attackbot_tp_002_scans_completed_total[1h]) < 
+          0.5 * avg_over_time(
+            rate(attackbot_tp_004_findings_discovered_total[1h]) / 
+            rate(attackbot_tp_002_scans_completed_total[1h])
+          [1d:])
+        for: 2h
+        labels:
+          severity: info
+          category: throughput
+          kpi_id: TP-005
+        annotations:
+          summary: "Findings per scan dropped by more than 50%"
+          description: "Current findings/scan ratio is significantly lower than baseline"
+          impact: "Potential reduction in detection effectiveness"
+          action: "Monitor and investigate if trend continues"
+
+      - alert: ReportGenerationSlow
+        expr: |
+          avg(attackbot_pf_008_report_generation_duration_seconds_sum) / 
+          avg(attackbot_pf_008_report_generation_duration_seconds_count) > 300
+        for: 1h
+        labels:
+          severity: info
+          category: performance
+          kpi_id: PF-008
+        annotations:
+          summary: "Average report generation time above 5 minutes"
+          description: "Average report generation time is {{ $value }} seconds"
+          impact: "Reports taking longer than expected to generate"
+          action: "Monitor report generation performance"
+
+      - alert: QueueDepthHigh
+        expr: attackbot_ru_006_queue_depth > 50
+        for: 5m
+        labels:
+          severity: info
+          category: resource_utilization
+          kpi_id: RU-006
+        annotations:
+          summary: "Queue depth above 50"
+          description: "Queue {{ $labels.queue_name }} has depth of {{ $value }}"
+          impact: "High queue depth may cause processing delays"
+          action: "Monitor queue processing rate"
+
+      - alert: MinIOStorageHigh
+        expr: attackbot_ru_005_minio_storage_usage_gb > 400
+        for: 1h
+        labels:
+          severity: info
+          category: resource_utilization
+          kpi_id: RU-005
+        annotations:
+          summary: "MinIO storage usage above 400 GB"
+          description: "MinIO storage usage is {{ $value }} GB (threshold: 400 GB)"
+          impact: "Approaching storage limits"
+          action: "Plan for storage expansion or cleanup"
+
+  # ===========================================================================
+  # SECURITY ALERTS
+  # ===========================================================================
+  - name: security_kpi_alerts
+    interval: 1h
+    rules:
+      - alert: NoCriticalFindings
+        expr: increase(attackbot_sc_002_critical_security_findings_total[24h]) == 0
+        for: 24h
+        labels:
+          severity: warning
+          category: security
+          kpi_id: SC-002
+        annotations:
+          summary: "No critical security findings in 24 hours"
+          description: "No critical security findings detected in the last 24 hours"
+          impact: "May indicate detection gaps or genuinely clean targets"
+          action: "Investigate if detection is working correctly"
+
+      - alert: ZeroDayDetectionLow
+        expr: |
+          (increase(attackbot_sc_003_zero_day_findings_total[7d]) / 
+           increase(attackbot_tp_004_findings_discovered_total[7d])) * 100 < 5
+        for: 7d
+        labels:
+          severity: info
+          category: security
+          kpi_id: SC-003
+        annotations:
+          summary: "Zero-day detection rate below 5%"
+          description: "Zero-day detection rate is {{ $value }}% (threshold: 5%)"
+          impact: "Low zero-day detection may indicate reliance on signature-based detection"
+          action: "Review and enhance zero-day detection capabilities"
+
+      - alert: CVECoverageLow
+        expr: |
+          (attackbot_sc_005_cves_covered_total / attackbot_sc_005_cves_detected_total) * 100 < 70
+        for: 24h
+        labels:
+          severity: warning
+          category: security
+          kpi_id: SC-005
+        annotations:
+          summary: "CVE coverage below 70%"
+          description: "CVE coverage is {{ $value }}% (threshold: 70%)"
+          impact: "Low CVE coverage may miss known vulnerabilities"
+          action: "Expand CVE database and update detection rules"

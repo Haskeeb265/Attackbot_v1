@@ -50,7 +50,12 @@ class MessageEnvelope(BaseModel):
             "Set by api-gateway; passed through all downstream messages."
         ),
     )
+    span_id: str | None = Field(
+        default=None,
+        description="Parent span ID associated with this message emission.",
+    )
     source_service: str = Field(
+        default="unknown",
         description="Name of the service that produced this message.",
     )
 
@@ -70,6 +75,7 @@ def build_envelope(
     source_service: str,
     schema_version: str = "1.0",
     trace_id: str | None = None,
+    span_id: str | None = None,
 ) -> dict[str, Any]:
     """
     Factory for creating envelope dicts. Always use this — never construct manually.
@@ -88,4 +94,5 @@ def build_envelope(
         source_service=source_service,
         schema_version=schema_version,
         trace_id=trace_id,
+        span_id=span_id,
     ).model_dump(mode="json")

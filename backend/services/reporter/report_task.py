@@ -30,6 +30,7 @@ from backend.services.reporter.storage import ReporterStorage
 from backend.shared.db import get_session, init_db
 from backend.shared.logging import get_logger
 from backend.shared.queue import QueuePublisher, Queues
+from backend.shared.idempotency import IdempotencyService
 from backend.shared.schemas.envelope import MessageEnvelope
 from backend.shared.schemas.report_jobs import ReportJobsPayload
 from backend.shared.storage import init_storage
@@ -47,6 +48,14 @@ init_storage(
 
 _storage = ReporterStorage(settings.reports_bucket, settings.evidence_bucket)
 
+def process_report_task(envelope_dict: dict[str, Any]) -> None:
+    """
+    Process a report task message from the queue.
+    Entry point for Celery workers.
+    """
+    process_report_envelope_sync(envelope_dict)
+
+
 
 def process_report_envelope_sync(envelope_dict: dict[str, Any]) -> None:
     asyncio.run(process_report_envelope(envelope_dict))
@@ -55,6 +64,20 @@ def process_report_envelope_sync(envelope_dict: dict[str, Any]) -> None:
 async def process_report_envelope(envelope_dict: dict[str, Any]) -> None:
     envelope = MessageEnvelope.model_validate(envelope_dict)
     payload = ReportJobsPayload.model_validate(envelope.payload)
+    
+    # Idempotency check
+    event_id = envelope.event_id
+    if event_id:
+        async with get_session() as session:
+            idempotency = IdempotencyService(session)
+            cached = await idempotency.check_and_record(
+                event_id=event_id,
+                service="reporter",
+                operation="report.generate",
+            )
+            if cached is not None:
+                log.info("Report message already processed - skipping", event_id=event_id)
+                return
 
     formats = payload.formats_requested or settings.get_default_formats()
     Path(settings.temp_output_dir).mkdir(parents=True, exist_ok=True)

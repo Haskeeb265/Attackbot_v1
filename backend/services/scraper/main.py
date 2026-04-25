@@ -210,6 +210,12 @@ async def _publish_due_scan_jobs(batch_size: int | None = None) -> dict:
 async def lifespan(app: FastAPI):
     global _redis, _scheduler, _publisher, _repository, _reconciler
     settings.require_fields(["database_url", "redis_url", "rabbitmq_url"])
+    try:
+        from backend.shared.tracing import init_tracing
+
+        init_tracing(settings.service_name, settings.jaeger_endpoint)
+    except Exception as exc:
+        log.warning("tracing_init_failed", error=str(exc))
 
     # Init DB
     init_db(settings.database_url, settings.db_pool_size, settings.db_max_overflow)
@@ -300,6 +306,12 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="AttackBot Scraper", lifespan=lifespan)
+try:
+    from backend.shared.tracing import instrument_fastapi
+
+    instrument_fastapi(app)
+except Exception as exc:
+    log.warning("tracing_fastapi_instrumentation_failed", error=str(exc))
 
 
 # ---------------------------------------------------------------------------

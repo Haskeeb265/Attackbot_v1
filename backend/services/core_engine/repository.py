@@ -2,6 +2,10 @@ import uuid
 import json
 from datetime import datetime, timezone
 from typing import Optional
+from uuid import UUID
+from sqlalchemy.future import select
+from backend.shared.models.scans import Scan
+
 
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import text
@@ -19,6 +23,30 @@ logger = get_logger("core_engine.repository")
 class ScanRepository:
     def __init__(self, session: AsyncSession):
         self.session = session
+
+    async def create_scan(
+        self,
+        scan_id: UUID,
+        program_id: UUID,
+        config: dict,
+        status: str = "running",
+        priority: int = 1
+    ) -> Scan:
+        """Create a new scan with initial state."""  
+        scan = Scan(
+            scan_id=scan_id,
+            program_id=program_id,
+            status=status,
+            priority=priority,
+            feature_flags=config,
+            created_at=datetime.now(timezone.utc),
+            started_at=datetime.now(timezone.utc)
+        )
+        self.session.add(scan)
+        await self.session.commit()
+        await self.session.refresh(scan)
+        return scan
+
 
     # ── Scan lifecycle ──────────────────────────────────────────────────
 

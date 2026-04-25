@@ -2,7 +2,7 @@ from contextlib import asynccontextmanager
 import httpx
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -12,10 +12,13 @@ from backend.services.core_engine.startup_checks import (
     collect_toolchain_checks,
     startup_checks_ok,
 )
-from backend.services.core_engine.watchdog import recover_stuck_scans
+from backend.services.core_engine.watchdog import recover_stuck_scans, start_watchdog
 from backend.shared.db import init_db, get_session, check_db_health
+from backend.shared.dlq_monitor import monitor_all_dlqs_job
+from backend.shared.jobs.idempotency_cleanup import cleanup_expired_idempotency_keys_job
 from backend.shared.health import HealthResponse, ComponentHealth, HealthStatus
 from backend.shared.logging import configure_logging, get_logger
+from backend.shared.circuit_breaker import ServiceCircuitBreakers
 from backend.shared.queue import (
     Queues,
     check_rabbitmq_health,
@@ -129,6 +132,19 @@ async def _build_payload_from_scraper(
     )
 
 
+def _build_payload_from_minimal_body(body: dict) -> ScanJobsPayload:
+    target = body.get("target") or body.get("program_id")
+    in_scope = [ScopeEntry(asset_type="domain", value=str(target), notes="manual_start")]
+    return ScanJobsPayload(
+        program_id=body["program_id"],
+        platform="hackerone",
+        handle=str(body["program_id"]),
+        scope=SchemaScopeDefinition(in_scope=in_scope, out_of_scope=[]),
+        feature_flags=SchemaFeatureFlags(**body.get("feature_flags", {})),
+        priority=int(body.get("priority", 1)),
+    )
+
+
 async def _reserve_scan_id(payload: ScanJobsPayload) -> str:
     """
     Reserve the scan row before queueing so callers can correlate on scan_id.
@@ -179,6 +195,13 @@ def _enqueue_scan(payload: ScanJobsPayload) -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    try:
+        from backend.shared.tracing import init_tracing, instrument_httpx
+
+        init_tracing(config.service_name, config.jaeger_endpoint)
+        instrument_httpx()
+    except Exception as exc:
+        logger.warning("tracing_init_failed", error=str(exc))
     config.require_fields(
         [
             "database_url",
@@ -220,13 +243,28 @@ async def lifespan(app: FastAPI):
         _enqueue_scan(payload)
         logger.info("Republished scan job", program_id=program_id)
 
+    # Start watchdog using the new start_watchdog function
+    start_watchdog(scheduler)
+    
+    # Add DLQ monitoring job
     scheduler.add_job(
-        recover_stuck_scans,
+        monitor_all_dlqs_job,
         "interval",
-        seconds=config.watchdog_interval_seconds,
-        kwargs={"republish_fn": _republish,
-                "stale_hours": config.watchdog_stale_threshold_hours},
+        seconds=60,
+        kwargs={"rabbitmq_url": config.rabbitmq_url},
+        id='dlq_monitor',
+        replace_existing=True,
     )
+    
+    # Add idempotency cleanup job (runs daily)
+    scheduler.add_job(
+        cleanup_expired_idempotency_keys_job,
+        "interval",
+        hours=24,
+        id='idempotency_cleanup',
+        replace_existing=True,
+    )
+    
     scheduler.start()
     logger.info("Core Engine started", watchdog_interval=config.watchdog_interval_seconds)
     yield
@@ -236,6 +274,12 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Core Engine", lifespan=lifespan)
+try:
+    from backend.shared.tracing import instrument_fastapi
+
+    instrument_fastapi(app)
+except Exception as exc:
+    logger.warning("tracing_fastapi_instrumentation_failed", error=str(exc))
 
 
 @app.get("/api/v1/health")
@@ -265,6 +309,7 @@ async def health() -> JSONResponse:
         if any(component == HealthStatus.UNHEALTHY for component in statuses)
         else HealthStatus.HEALTHY
     )
+    breaker_states = ServiceCircuitBreakers.get_state_summary()
     return JSONResponse(
         content=HealthResponse(
             status=status,
@@ -298,9 +343,31 @@ async def health() -> JSONResponse:
                         )
                     ),
                 ),
+                "circuit_breakers": ComponentHealth(
+                    status=HealthStatus.HEALTHY,
+                    detail=", ".join(f"{k}:{v}" for k, v in sorted(breaker_states.items()))
+                    if breaker_states
+                    else "none",
+                ),
             },
         ).model_dump(mode="json")
     )
+
+
+@app.get("/health")
+async def legacy_health() -> JSONResponse:
+    return await health()
+
+
+@app.get("/api/v1/circuit-breakers")
+async def list_circuit_breakers() -> JSONResponse:
+    return JSONResponse({"circuit_breakers": ServiceCircuitBreakers.get_state_summary()})
+
+
+@app.post("/api/v1/circuit-breakers/reset")
+async def reset_circuit_breakers() -> JSONResponse:
+    reset_count = ServiceCircuitBreakers.reset_all()
+    return JSONResponse({"status": "success", "reset_count": reset_count})
 
 
 @app.post("/api/v1/scans/start")
@@ -313,6 +380,8 @@ async def start_scan(body: dict) -> JSONResponse:
             feature_flags=req.feature_flags,
             priority=req.priority,
         )
+    elif "program_id" in body and ("target" in body or "scan_type" in body):
+        payload = _build_payload_from_minimal_body(body)
     else:
         payload = ScanJobsPayload(**body)
     scan_id = await _reserve_scan_id(payload)
@@ -469,3 +538,84 @@ async def inspect_dlq() -> JSONResponse:
         [Queues.SCAN_JOBS, Queues.REPORT_JOBS],
     )
     return JSONResponse({"queues": queue_states})
+
+
+# DLQ Monitoring endpoints
+@app.get("/api/v1/queue/dlq/monitor")
+async def monitor_dlq() -> JSONResponse:
+    "Monitor all DLQ depths and return current state."
+    from backend.shared.dlq_monitor import DLQMonitor
+    from datetime import datetime, timezone
+    monitor = DLQMonitor(config.rabbitmq_url)
+    try:
+        await monitor.connect()
+        depths = await monitor.monitor_all_dlqs()
+        total_messages = sum(depths.values())
+        return JSONResponse({
+            "dlqs": depths,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "total_messages": total_messages
+        })
+    finally:
+        await monitor.close()
+
+
+@app.get("/api/v1/queue/dlq/{dlq_name}/inspect")
+async def inspect_dlq_messages(dlq_name: str, limit: int = 100) -> JSONResponse:
+    "Inspect messages in a specific DLQ."
+    from backend.shared.dlq_monitor import DLQMonitor
+    from datetime import datetime, timezone
+    monitor = DLQMonitor(config.rabbitmq_url)
+    try:
+        await monitor.connect()
+        messages = await monitor.inspect_messages(dlq_name, limit=limit)
+        serialized_messages = [
+            message.model_dump(mode="json") if hasattr(message, "model_dump") else message
+            for message in messages
+        ]
+        return JSONResponse({
+            "dlq": dlq_name.replace(".dlq", ""),
+            "messages": serialized_messages,
+            "count": len(serialized_messages),
+            "timestamp": datetime.now(timezone.utc).isoformat()
+        })
+    finally:
+        await monitor.close()
+
+
+@app.post("/api/v1/queue/dlq/{dlq_name}/replay")
+async def replay_dlq_messages(dlq_name: str, request: Request) -> JSONResponse:
+    "Replay messages from a DLQ to their original queue."
+    from backend.shared.dlq_monitor import DLQMonitor
+    from datetime import datetime, timezone
+    
+    request_body = await request.json()
+    message_ids = request_body.get("message_ids", [])
+    
+    monitor = DLQMonitor(config.rabbitmq_url)
+    try:
+        await monitor.connect()
+        
+        # Get all messages from the DLQ
+        all_messages = await monitor.inspect_messages(dlq_name, limit=1000)
+        
+        replayed = 0
+        failed = 0
+        
+        for msg in all_messages:
+            if msg.message_id in message_ids:
+                success = await monitor.replay_message(dlq_name, msg)
+                if success:
+                    replayed += 1
+                else:
+                    failed += 1
+        
+        return JSONResponse({
+            "dlq": dlq_name.replace(".dlq", ""),
+            "mode": "selective",
+            "replayed": replayed,
+            "failed": failed,
+            "timestamp": datetime.now(timezone.utc).isoformat()
+        })
+    finally:
+        await monitor.close()

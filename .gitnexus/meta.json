@@ -1,13 +1,13 @@
 {
   "repoPath": "C:\\Users\\Haseeb\\Desktop\\Projects\\Startup\\Attackbot_v1",
-  "lastCommit": "5005938ad50f16b234a20f1f6cc29a6d75d4c098",
-  "indexedAt": "2026-04-12T23:01:24.460Z",
+  "lastCommit": "cc99ba70663bfbd7c2cda7d786ff1bdadfdb14d0",
+  "indexedAt": "2026-04-25T20:21:20.727Z",
   "stats": {
-    "files": 203,
-    "nodes": 2066,
-    "edges": 6631,
-    "communities": 112,
-    "processes": 169,
+    "files": 251,
+    "nodes": 2536,
+    "edges": 7905,
+    "communities": 141,
+    "processes": 208,
     "embeddings": 0
   }
 }

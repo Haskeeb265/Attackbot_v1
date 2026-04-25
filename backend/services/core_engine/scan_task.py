@@ -23,11 +23,21 @@ from backend.shared.db import get_session
 from backend.shared.queue import QueuePublisher
 from backend.shared.logging import get_logger
 from backend.shared.exceptions import ScanError
+from backend.shared.idempotency import IdempotencyService
+from backend.shared.schemas.envelope import MessageEnvelope
 from backend.shared.schemas.scan_jobs import (
     ScanJobsPayload,
     ScopeDefinition as SharedScopeDefinition,
 )
 from backend.shared.storage import init_storage
+
+
+def process_scan_task(envelope_dict: dict) -> None:
+    """
+    Process a scan task message from the queue.
+    Entry point for Celery workers.
+    """
+    run_scan_task(envelope_dict)
 
 logger = get_logger("core_engine.scan_task")
 
@@ -87,6 +97,26 @@ async def _async_scan_pipeline(payload: ScanJobsPayload | dict) -> None:
     config = EngineConfig()
     from backend.shared.db import init_db
     init_db(config.database_url)
+    
+    # Idempotency check: extract event_id from MessageEnvelope
+    event_id = None
+    if isinstance(payload, dict) and "event_id" in payload:
+        envelope = MessageEnvelope.model_validate(payload)
+        event_id = envelope.event_id
+        payload = envelope.payload
+    
+    # Check if already processed
+    if event_id:
+        async with get_session() as session:
+            idempotency = IdempotencyService(session)
+            cached = await idempotency.check_and_record(
+                event_id=event_id,
+                service="core_engine",
+                operation="scan.execute",
+            )
+            if cached is not None:
+                logger.info("Scan message already processed - skipping", event_id=event_id)
+                return
     init_storage(
         endpoint=config.minio_endpoint,
         access_key=config.minio_access_key,

@@ -1,0 +1,340 @@
+{
+  "dashboard": {
+    "id": null,
+    "uid": "attackbot-kpi-executive",
+    "title": "AttackBot - Executive KPI Dashboard",
+    "tags": ["attackbot", "kpi", "executive"],
+    "timezone": "browser",
+    "schemaVersion": 37,
+    "version": 1,
+    "refresh": "30s",
+    "panels": [
+      {
+        "id": 1,
+        "title": "System Health Overview",
+        "type": "stat",
+        "gridPos": {"h": 4, "w": 6, "x": 0, "y": 0},
+        "targets": [
+          {
+            "expr": "attackbot_sh_002_service_health_status",
+            "instant": true
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "mappings": [
+              {"options": {"0": {"text": "Unhealthy"}, "0.5": {"text": "Degraded"}, "1": {"text": "Healthy"}}, "type": "value"}
+            ],
+            "thresholds": {"mode": "absolute", "steps": [{"color": "red", "value": null}, {"color": "orange", "value": 0.5}, {"color": "green", "value": 1}]}
+          },
+          "overrides": []
+        }
+      },
+      {
+        "id": 2,
+        "title": "System Uptime",
+        "type": "stat",
+        "gridPos": {"h": 4, "w": 6, "x": 6, "y": 0},
+        "targets": [
+          {
+            "expr": "attackbot_sh_001_system_uptime_seconds",
+            "instant": true
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "s",
+            "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}]}
+          },
+          "overrides": []
+        }
+      },
+      {
+        "id": 3,
+        "title": "Scans Initiated",
+        "type": "stat",
+        "gridPos": {"h": 4, "w": 6, "x": 12, "y": 0},
+        "targets": [
+          {
+            "expr": "sum(attackbot_tp_001_scans_initiated_total)",
+            "instant": true
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "short",
+            "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}]}
+          },
+          "overrides": []
+        }
+      },
+      {
+        "id": 4,
+        "title": "Scans Completed",
+        "type": "stat",
+        "gridPos": {"h": 4, "w": 6, "x": 18, "y": 0},
+        "targets": [
+          {
+            "expr": "sum(attackbot_tp_002_scans_completed_total)",
+            "instant": true
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "short",
+            "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}]}
+          },
+          "overrides": []
+        }
+      },
+      {
+        "id": 5,
+        "title": "Scan Success Rate (RL-001)",
+        "type": "gauge",
+        "gridPos": {"h": 4, "w": 6, "x": 0, "y": 4},
+        "targets": [
+          {
+            "expr": "(sum(attackbot_rl_001_scans_succeeded_total) / sum(attackbot_tp_001_scans_initiated_total)) * 100",
+            "instant": true
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "percent",
+            "thresholds": {"mode": "absolute", "steps": [{"color": "red", "value": null}, {"color": "orange", "value": 90}, {"color": "green", "value": 95}]}
+          },
+          "overrides": []
+        }
+      },
+      {
+        "id": 6,
+        "title": "Findings Discovered",
+        "type": "stat",
+        "gridPos": {"h": 4, "w": 6, "x": 6, "y": 4},
+        "targets": [
+          {
+            "expr": "sum(attackbot_tp_004_findings_discovered_total)",
+            "instant": true
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "short",
+            "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}]}
+          },
+          "overrides": []
+        }
+      },
+      {
+        "id": 7,
+        "title": "Reports Generated",
+        "type": "stat",
+        "gridPos": {"h": 4, "w": 6, "x": 12, "y": 4},
+        "targets": [
+          {
+            "expr": "sum(attackbot_tp_006_reports_generated_total)",
+            "instant": true
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "short",
+            "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}]}
+          },
+          "overrides": []
+        }
+      },
+      {
+        "id": 8,
+        "title": "Report Generation Success Rate (RL-004)",
+        "type": "gauge",
+        "gridPos": {"h": 4, "w": 6, "x": 18, "y": 4},
+        "targets": [
+          {
+            "expr": "(sum(attackbot_rl_004_report_generation_success_total) / sum(attackbot_tp_006_reports_generated_total{status=~\"completed|failed\"})) * 100",
+            "instant": true
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "percent",
+            "thresholds": {"mode": "absolute", "steps": [{"color": "red", "value": null}, {"color": "orange", "value": 95}, {"color": "green", "value": 98}]}
+          },
+          "overrides": []
+        }
+      },
+      {
+        "id": 9,
+        "title": "Average Scan Duration (PF-001)",
+        "type": "stat",
+        "gridPos": {"h": 4, "w": 6, "x": 0, "y": 8},
+        "targets": [
+          {
+            "expr": "avg(attackbot_pf_001_scan_duration_seconds_sum) / avg(attackbot_pf_001_scan_duration_seconds_count)",
+            "instant": true
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "s",
+            "thresholds": {"mode": "absolute", "steps": [{"color": "red", "value": 1800}, {"color": "orange", "value": 1200}, {"color": "green", "value": 600}]}
+          },
+          "overrides": []
+        }
+      },
+      {
+        "id": 10,
+        "title": "95th Percentile Scan Duration (PF-002)",
+        "type": "stat",
+        "gridPos": {"h": 4, "w": 6, "x": 6, "y": 8},
+        "targets": [
+          {
+            "expr": "quantile(0.95, attackbot_pf_002_scan_duration_summary_seconds_sum / attackbot_pf_002_scan_duration_summary_seconds_count)",
+            "instant": true
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "s",
+            "thresholds": {"mode": "absolute", "steps": [{"color": "red", "value": 2700}, {"color": "orange", "value": 1800}, {"color": "green", "value": 900}]}
+          },
+          "overrides": []
+        }
+      },
+      {
+        "id": 11,
+        "title": "Verification Rate (QL-001)",
+        "type": "gauge",
+        "gridPos": {"h": 4, "w": 6, "x": 12, "y": 8},
+        "targets": [
+          {
+            "expr": "(sum(attackbot_ql_001_verified_findings_total) / sum(attackbot_tp_004_findings_discovered_total)) * 100",
+            "instant": true
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "percent",
+            "thresholds": {"mode": "absolute", "steps": [{"color": "red", "value": null}, {"color": "orange", "value": 60}, {"color": "green", "value": 70}]}
+          },
+          "overrides": []
+        }
+      },
+      {
+        "id": 12,
+        "title": "False Positive Rate (QL-002)",
+        "type": "gauge",
+        "gridPos": {"h": 4, "w": 6, "x": 18, "y": 8},
+        "targets": [
+          {
+            "expr": "(sum(attackbot_ql_002_false_positive_findings_total) / sum(attackbot_ql_001_verified_findings_total)) * 100",
+            "instant": true
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "percent",
+            "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": 0}, {"color": "orange", "value": 3}, {"color": "red", "value": 5}]}
+          },
+          "overrides": []
+        }
+      },
+      {
+        "id": 13,
+        "title": "Clean Scan Rate (QL-006)",
+        "type": "gauge",
+        "gridPos": {"h": 4, "w": 6, "x": 0, "y": 12},
+        "targets": [
+          {
+            "expr": "(sum(attackbot_ql_006_clean_scans_total) / sum(attackbot_tp_002_scans_completed_total{status=\"completed\"})) * 100",
+            "instant": true
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "percent",
+            "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": 0}, {"color": "orange", "value": 30}, {"color": "red", "value": 40}]}
+          },
+          "overrides": []
+        }
+      },
+      {
+        "id": 14,
+        "title": "DLQ Messages",
+        "type": "stat",
+        "gridPos": {"h": 4, "w": 6, "x": 6, "y": 12},
+        "targets": [
+          {
+            "expr": "sum(rabbitmq_dlq_depth)",
+            "instant": true
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "short",
+            "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": 0}, {"color": "orange", "value": 1}, {"color": "red", "value": 10}]}
+          },
+          "overrides": []
+        }
+      },
+      {
+        "id": 15,
+        "title": "Active Scans",
+        "type": "stat",
+        "gridPos": {"h": 4, "w": 6, "x": 12, "y": 12},
+        "targets": [
+          {
+            "expr": "attackbot_op_002_active_scans",
+            "instant": true
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "short",
+            "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}]}
+          },
+          "overrides": []
+        }
+      },
+      {
+        "id": 16,
+        "title": "Programs Monitored",
+        "type": "stat",
+        "gridPos": {"h": 4, "w": 6, "x": 18, "y": 12},
+        "targets": [
+          {
+            "expr": "sum(attackbot_op_001_programs_monitored)",
+            "instant": true
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "short",
+            "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}]}
+          },
+          "overrides": []
+        }
+      }
+    ],
+    "templating": {
+      "list": []
+    },
+    "annotations": {
+      "list": []
+    },
+    "refresh": "30s",
+    "schemaVersion": 37,
+    "style": "dark",
+    "tags": ["attackbot", "kpi", "executive"],
+    "time": {
+      "from": "now-1h",
+      "to": "now"
+    },
+    "timepicker": {},
+    "timezone": "",
+    "title": "AttackBot - Executive KPI Dashboard",
+    "uid": "attackbot-kpi-executive",
+    "version": 1,
+    "weekStart": ""
+  }
+}

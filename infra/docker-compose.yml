@@ -73,6 +73,7 @@ services:
       - rabbitmq_data:/var/lib/rabbitmq
     networks: [attackbot-net]
     ports:
+      - "5672:5672"     # AMQP protocol for apps/tests
       - "15672:15672"   # management UI — restrict to localhost in prod
     restart: unless-stopped
     deploy:
@@ -634,10 +635,14 @@ services:
       resources:
         limits: { cpus: "0.5", memory: "256M" }
 
-  tempo:
-    image: grafana/tempo:latest
+  jaeger:
+    image: jaegertracing/all-in-one:1.57
+    ports:
+      - "16686:16686"
+      - "14268:14268"
+      - "6831:6831/udp"
     networks: [attackbot-net]
     restart: unless-stopped
     deploy:
       resources:
-        limits: { cpus: "0.5", memory: "256M" }
+        limits: { cpus: "0.5", memory: "512M" }

@@ -44,6 +44,7 @@ class BaseServiceConfig(BaseSettings):
     service_name: str = "unknown"
     log_level: str = "INFO"
     environment: str = "development"
+    jaeger_endpoint: str = "http://jaeger:14268/api/traces"
 
     # E2E timeout scaling
     e2e_tool_timeout_scale: float = 1.0

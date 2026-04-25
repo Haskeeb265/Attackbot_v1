@@ -27,6 +27,12 @@ log = get_logger(__name__)
 @asynccontextmanager
 async def lifespan(app: FastAPI):  # type: ignore[type-arg]
     log.info("service_starting", service=settings.service_name, port=settings.port)
+    try:
+        from backend.shared.tracing import init_tracing
+
+        init_tracing(settings.service_name, settings.jaeger_endpoint)
+    except Exception as exc:
+        log.warning("tracing_init_failed", error=str(exc))
     init_db(settings.database_url, settings.db_pool_size, settings.db_max_overflow)
     log.info("service_ready", service=settings.service_name)
     yield
@@ -34,6 +40,12 @@ async def lifespan(app: FastAPI):  # type: ignore[type-arg]
 
 
 app = FastAPI(title="AttackBot Attack Graph Engine", version="1.0.0", lifespan=lifespan)
+try:
+    from backend.shared.tracing import instrument_fastapi
+
+    instrument_fastapi(app)
+except Exception as exc:
+    log.warning("tracing_fastapi_instrumentation_failed", error=str(exc))
 
 Instrumentator().instrument(app).expose(app)
 
