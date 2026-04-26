@@ -326,6 +326,8 @@ async def generate_reports(request: GenerateReportsRequest) -> JSONResponse:
 
 @app.get("/api/v1/health", response_model=HealthResponse)
 async def health() -> HealthResponse:
+    from datetime import datetime, timezone
+
     db_ok = await check_db_health()
     rabbitmq_ok = await check_rabbitmq_health(
         settings.rabbitmq_url,
@@ -346,24 +348,31 @@ async def health() -> HealthResponse:
 
     components = {
         "database": ComponentHealth(
+            name="database",
             status=HealthStatus.HEALTHY if db_ok else HealthStatus.UNHEALTHY
         ),
         "rabbitmq": ComponentHealth(
+            name="rabbitmq",
             status=HealthStatus.HEALTHY if rabbitmq_ok else HealthStatus.UNHEALTHY
         ),
         "storage": ComponentHealth(
+            name="storage",
             status=HealthStatus.HEALTHY if storage_ok else HealthStatus.UNHEALTHY
         ),
         "core_engine": ComponentHealth(
+            name="core_engine",
             status=HealthStatus.HEALTHY if core_engine_ok else HealthStatus.UNHEALTHY
         ),
         "scraper": ComponentHealth(
+            name="scraper",
             status=HealthStatus.HEALTHY if scraper_ok else HealthStatus.UNHEALTHY
         ),
         "scheduler": ComponentHealth(
+            name="scheduler",
             status=HealthStatus.HEALTHY if scheduler.running else HealthStatus.UNHEALTHY
         ),
         "attack_graph_engine": ComponentHealth(
+            name="attack_graph_engine",
             status=HealthStatus.DEGRADED,
             detail="chain_detail_api_not_yet_available",
         ),
@@ -380,6 +389,6 @@ async def health() -> HealthResponse:
     return HealthResponse(
         status=overall,
         service=settings.service_name,
-        timestamp=datetime.now(timezone.utc),
+        timestamp=datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
         components=components,
     )

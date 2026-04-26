@@ -71,7 +71,7 @@ async def health() -> HealthResponse:
         "reporter": await _probe_upstream(settings.reporter_url),
         "attack-graph-engine": await _probe_upstream(settings.graph_url),
     }
-    components = {name: ComponentHealth(status=s) for name, s in statuses.items()}
+    components = {name: ComponentHealth(name=name, status=s) for name, s in statuses.items()}
     overall = (
         HealthStatus.HEALTHY
         if all(s == HealthStatus.HEALTHY for s in statuses.values())
@@ -82,7 +82,7 @@ async def health() -> HealthResponse:
     return HealthResponse(
         status=overall,
         service=settings.service_name,
-        timestamp=datetime.now(timezone.utc),
+        timestamp=datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
         components=components,
     )
 

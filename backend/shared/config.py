@@ -83,3 +83,19 @@ class BaseServiceConfig(BaseSettings):
             raise RuntimeError(
                 f"{self.service_name} missing required configuration: {', '.join(missing)}"
             )
+
+
+class QueueConfig(BaseSettings):
+    """Queue configuration with backpressure support (Sprint #4)."""
+
+    rabbitmq_url: str = "amqp://localhost"
+    max_queue_depths: dict[str, int] = {
+        "scan_jobs": 1000,
+        "report_jobs": 500,
+        "dlq": 10000,
+    }
+
+    @property
+    def default_max_depth(self) -> int:
+        # Conservative default suitable for tests; can be overridden per queue.
+        return 1000

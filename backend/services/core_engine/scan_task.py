@@ -42,6 +42,30 @@ def process_scan_task(envelope_dict: dict) -> None:
 logger = get_logger("core_engine.scan_task")
 
 
+# Sprint #4 backpressure integration (used by verification tests)
+from backend.shared.queue import BackpressurePublisher
+from backend.shared.config import QueueConfig
+
+publisher = BackpressurePublisher(EngineConfig().rabbitmq_url, QueueConfig())
+
+
+async def publish_scan_job(scan_id, payload: dict) -> bool:
+    """
+    Publish a scan job with backpressure.
+
+    Verification tests patch the module-level `publisher`.
+    """
+    import aio_pika
+    import json
+
+    message = aio_pika.Message(
+        body=json.dumps(payload).encode(),
+        headers={"scan_id": str(scan_id)},
+        delivery_mode=aio_pika.DeliveryMode.PERSISTENT,
+    )
+    return await publisher.publish("scan_jobs", message)
+
+
 def run_scan_task(payload: ScanJobsPayload | dict) -> None:
     """
     Celery task entry point. Synchronous wrapper around the async pipeline.

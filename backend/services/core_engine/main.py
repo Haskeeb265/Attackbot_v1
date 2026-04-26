@@ -16,7 +16,7 @@ from backend.services.core_engine.startup_checks import (
     startup_checks_ok,
 )
 from backend.services.core_engine.watchdog import recover_stuck_scans, start_watchdog
-from backend.shared.db import init_db, get_session, check_db_health
+from backend.shared.db import init_db, get_session, check_db_health, DBHealthChecker
 from backend.shared.dlq_monitor import monitor_all_dlqs_job
 from backend.shared.jobs.idempotency_cleanup import cleanup_expired_idempotency_keys_job
 from backend.shared.health import HealthResponse, ComponentHealth, HealthStatus
@@ -294,7 +294,10 @@ except Exception as exc:
 @app.get("/api/v1/health")
 async def health() -> JSONResponse:
     from datetime import datetime, timezone
-    db_ok = await check_db_health()
+
+    async with get_session() as session:
+        db_component = await DBHealthChecker().check(session)
+    db_ok = db_component.status != HealthStatus.UNHEALTHY
     rabbitmq_ok = await check_rabbitmq_health(
         config.rabbitmq_url,
         [Queues.SCAN_JOBS, Queues.REPORT_JOBS],
@@ -323,24 +326,33 @@ async def health() -> JSONResponse:
         content=HealthResponse(
             status=status,
             service=config.service_name,
-            timestamp=datetime.now(timezone.utc),
+            timestamp=datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
             components={
                 "database": ComponentHealth(
-                    status=HealthStatus.HEALTHY if db_ok else HealthStatus.UNHEALTHY
+                    name="database",
+                    status=db_component.status,
+                    latency_ms=db_component.latency_ms,
+                    detail=db_component.detail,
+                    error=db_component.error,
                 ),
                 "rabbitmq": ComponentHealth(
+                    name="rabbitmq",
                     status=HealthStatus.HEALTHY if rabbitmq_ok else HealthStatus.UNHEALTHY
                 ),
                 "scraper_api": ComponentHealth(
+                    name="scraper_api",
                     status=HealthStatus.HEALTHY if scraper_ok else HealthStatus.UNHEALTHY
                 ),
                 "storage": ComponentHealth(
+                    name="storage",
                     status=HealthStatus.HEALTHY if storage_ok else HealthStatus.UNHEALTHY
                 ),
                 "scheduler": ComponentHealth(
+                    name="scheduler",
                     status=HealthStatus.HEALTHY if scheduler_ok else HealthStatus.UNHEALTHY
                 ),
                 "toolchain": ComponentHealth(
+                    name="toolchain",
                     status=HealthStatus.HEALTHY if toolchain_ok else HealthStatus.UNHEALTHY,
                     detail=(
                         None
@@ -353,6 +365,7 @@ async def health() -> JSONResponse:
                     ),
                 ),
                 "circuit_breakers": ComponentHealth(
+                    name="circuit_breakers",
                     status=HealthStatus.HEALTHY,
                     detail=", ".join(f"{k}:{v}" for k, v in sorted(breaker_states.items()))
                     if breaker_states

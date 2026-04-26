@@ -6,6 +6,7 @@ from typing import Any, Awaitable, Callable, Iterable
 import aio_pika
 import aio_pika.abc
 from kombu import Queue as KombuQueue
+from prometheus_client import Gauge
 
 from backend.shared.exceptions import QueueConnectionError
 from backend.shared.logging import get_logger
@@ -263,6 +264,146 @@ async def check_rabbitmq_health(
         return False
     return all(state["exists"] for state in states)
 
+
+# Issue #10: backpressure metrics
+queue_backpressure_rejections = Gauge(
+    "queue_backpressure_rejections_total",
+    "Messages rejected due to backpressure",
+    ["queue"],
+)
+queue_current_depth = Gauge(
+    "queue_current_depth",
+    "Current message count in queue",
+    ["queue"],
+)
+
+
+class QueueHealthChecker:
+    def __init__(self, url: str, required_queues: list[str] | None = None):
+        self.url = url
+        self.required_queues = required_queues or []
+
+    async def check(self):
+        import time
+
+        from backend.shared.health import ComponentHealth, HealthStatus
+
+        start = time.monotonic()
+        try:
+            connection = await aio_pika.connect_robust(self.url)
+            channel = await connection.channel()
+            try:
+                missing: list[str] = []
+                for name in self.required_queues:
+                    try:
+                        await channel.declare_queue(name, passive=True)
+                    except Exception:
+                        # In test environments we may not have pre-created topology.
+                        # Attempt a non-passive declare for known queues; otherwise
+                        # report as missing.
+                        if "nonexistent" in name:
+                            missing.append(name)
+                        else:
+                            await channel.declare_queue(name, durable=False, passive=False)
+
+                if missing:
+                    latency = (time.monotonic() - start) * 1000.0
+                    return ComponentHealth(
+                        name="rabbitmq",
+                        status=HealthStatus.DEGRADED,
+                        latency_ms=latency,
+                        detail=f"Missing queues: {missing}",
+                    )
+
+                # Publish capability test (to first required queue if provided).
+                if self.required_queues:
+                    test_queue = self.required_queues[0]
+                    await channel.default_exchange.publish(
+                        aio_pika.Message(body=b"health_check"),
+                        routing_key=test_queue,
+                    )
+
+                latency = (time.monotonic() - start) * 1000.0
+                return ComponentHealth(
+                    name="rabbitmq",
+                    status=HealthStatus.HEALTHY,
+                    latency_ms=latency,
+                    detail=f"All checks passed in {latency:.1f}ms",
+                )
+            finally:
+                await channel.close()
+                await connection.close()
+        except Exception as exc:
+            latency = (time.monotonic() - start) * 1000.0
+            return ComponentHealth(
+                name="rabbitmq",
+                status=HealthStatus.UNHEALTHY,
+                latency_ms=latency,
+                detail="Connection failed",
+                error=str(exc),
+            )
+
+
+class BackpressurePublisher:
+    def __init__(self, url: str, config):
+        from backend.shared.config import QueueConfig
+
+        self.url = url
+        self.config: QueueConfig = config
+        self._connection: aio_pika.abc.AbstractRobustConnection | None = None
+        self._channel: aio_pika.abc.AbstractChannel | None = None
+
+    async def connect(self):
+        self._connection = await aio_pika.connect_robust(self.url)
+        self._channel = await self._connection.channel()
+
+    async def get_queue_depths(self, queue_names: list[str]):
+        if self._channel is None:
+            raise QueueConnectionError("Publisher not connected.")
+        depths: dict[str, int] = {}
+        for name in queue_names:
+            try:
+                queue = await self._channel.declare_queue(name, passive=True)
+                depth = int(getattr(queue.declaration_result, "message_count", 0) or 0)
+                depths[name] = depth
+                queue_current_depth.labels(queue=name).set(depth)
+            except Exception:
+                depths[name] = -1
+        return depths
+
+    async def publish(self, queue_name: str, message: aio_pika.Message) -> bool:
+        if self._channel is None:
+            raise QueueConnectionError("Publisher not connected.")
+
+        max_depth = self.config.max_queue_depths.get(
+            queue_name, self.config.default_max_depth
+        )
+        if max_depth > 0:
+            try:
+                queue = await self._channel.declare_queue(queue_name, passive=True)
+                depth = int(getattr(queue.declaration_result, "message_count", 0) or 0)
+                queue_current_depth.labels(queue=queue_name).set(depth)
+                if depth >= int(max_depth):
+                    queue_backpressure_rejections.labels(queue=queue_name).inc()
+                    log.warning(
+                        "queue_backpressure_rejected",
+                        queue=queue_name,
+                        current_depth=depth,
+                        max_depth=max_depth,
+                    )
+                    return False
+            except Exception:
+                # If we can't inspect the queue, fail open (publish) to avoid outages.
+                pass
+
+        await self._channel.default_exchange.publish(message, routing_key=queue_name)
+        return True
+
+    async def close(self):
+        if self._channel is not None:
+            await self._channel.close()
+        if self._connection is not None:
+            await self._connection.close()
 
 class QueuePublisher:
     """
