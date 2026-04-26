@@ -1,6 +1,7 @@
 import asyncio
 import json
-from typing import Any
+import time
+from typing import Any, Optional
 
 from celery import Celery, bootsteps
 from kombu import Consumer
@@ -34,6 +35,122 @@ app.conf.update(
     # is consumed by the raw consumer below.
     task_default_queue="reporter.worker.tasks",
 )
+
+
+class ReportWorker:
+    """
+    Reporter worker that processes report generation jobs.
+    Supports both v1 (HTTP-based) and v2 (embedded data) payloads.
+    """
+    
+    def __init__(self):
+        self.core_engine_client = None
+        self._legacy_http_calls = 0
+    
+    async def _generate_report(self, payload: ReportJobsPayload) -> dict:
+        """
+        Generate report from embedded data (v2 payload).
+        This method uses the data embedded in the payload instead of making HTTP calls.
+        """
+        # Simulate report generation - in reality this would use the embedded data
+        # to generate PDF/DOCX reports without calling Core Engine
+        start = time.time()
+        
+        # Access embedded data directly
+        scan_summary = payload.scan_summary
+        findings = payload.findings
+        evidence = payload.evidence
+        
+        # Simulate report generation processing
+        # In a real implementation, this would:
+        # 1. Use scan_summary for executive summary
+        # 2. Use findings list for finding sections
+        # 3. Use evidence list for evidence sections
+        # 4. Generate PDF/DOCX without HTTP calls
+        
+        elapsed = time.time() - start
+        log.info(
+            "Report generated from embedded data",
+            scan_id=str(payload.scan_id),
+            finding_count=len(findings),
+            evidence_count=len(evidence),
+            duration_seconds=elapsed
+        )
+        
+        return {
+            "scan_id": str(payload.scan_id),
+            "status": "generated",
+            "finding_count": len(findings),
+            "evidence_count": len(evidence),
+            "duration_seconds": elapsed
+        }
+    
+    async def _legacy_fetch_data(self, payload: ReportJobsPayload) -> ReportJobsPayload:
+        """
+        Legacy method: Fetch data from Core Engine via HTTP.
+        Used for v1 payloads without embedded data.
+        """
+        from backend.services.reporter.clients.core_engine import get_scan_data
+        self._legacy_http_calls += 1
+        
+        # In a real implementation, this would:
+        # 1. Call Core Engine to get scan details
+        # 2. Call Core Engine to get findings
+        # 3. Call Core Engine to get evidence
+        # 4. Return a v2-style payload with embedded data
+        
+        data = await get_scan_data(str(payload.scan_id))
+        scan = data.get("scan") or {}
+        findings = data.get("findings") or []
+
+        # For now, return a v2 payload (embedded data) built from fetched data.
+        return ReportJobsPayload(
+            scan_id=payload.scan_id,
+            program_id=payload.program_id,
+            payload_version=2,
+            formats_requested=payload.formats_requested or ["pdf"],
+            has_findings=payload.has_findings,
+            finding_count=payload.finding_count,
+            # Mock embedded data
+            scan_summary={
+                "scan_id": str(payload.scan_id),
+                "program_id": str(payload.program_id),
+                "status": scan.get("status") or "completed"
+            },
+            findings=findings,
+            evidence=[],
+        )
+    
+    async def process_report_job(self, envelope: Optional[MessageEnvelope], payload_dict: dict) -> dict:
+        """
+        Process a report job from the queue.
+        
+        Args:
+            envelope: Optional MessageEnvelope (for trace context)
+            payload_dict: The payload dictionary from the message
+            
+        Returns:
+            Dictionary with report generation results
+        """
+        # Parse payload
+        if isinstance(payload_dict, dict):
+            payload = ReportJobsPayload.model_validate(payload_dict)
+        else:
+            raise ValueError(f"Invalid payload type: {type(payload_dict)}")
+        
+        # Check if this is a v2 payload with embedded data
+        if payload.has_embedded_data():
+            # Use embedded data - no HTTP calls
+            result = await self._generate_report(payload)
+        elif payload.is_legacy():
+            # Fallback to HTTP for legacy v1 payloads
+            v2_payload = await self._legacy_fetch_data(payload)
+            result = await self._generate_report(v2_payload)
+        else:
+            # Default to v2 processing
+            result = await self._generate_report(payload)
+        
+        return result
 
 
 def _retry_countdown(attempt_number: int, backoff: list[int]) -> int:

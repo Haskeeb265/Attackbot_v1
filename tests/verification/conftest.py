@@ -1,4 +1,4 @@
-﻿"""
+"""
 
 Pytest fixtures for verification tests.
 
@@ -78,30 +78,28 @@ async def rabbitmq_client():
 # Database session fixture
 
 @pytest.fixture(scope="function")
-
 async def db_session():
-
     """
-
-    Provides an async database session.
-
+    Provides an async database session with automatic cleanup.
     """
-
     from backend.shared.db import init_db, get_session
-
+    from sqlalchemy import text
     
-
     # Initialize DB with test URL
-
     db_url = os.environ.get("DATABASE_URL", "postgresql+asyncpg://attackbot:attackbot@localhost:5432/attackbot")
-
     init_db(db_url)
-
     
-
     async with get_session() as session:
-
         yield session
+        # Clean up all test data by truncating tables
+        # This ensures isolation between tests
+        try:
+            await session.execute(text("TRUNCATE TABLE domain_events CASCADE"))
+            await session.execute(text("ALTER SEQUENCE domain_event_sequence_seq RESTART WITH 1"))
+            await session.commit()
+        except Exception:
+            await session.rollback()
+        await session.close()
 
 
 

@@ -1,8 +1,9 @@
 # backend/shared/schemas/report_jobs.py
 from typing import Any, Literal
 from uuid import UUID
+from datetime import datetime
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator, computed_field
 
 from backend.shared.schemas.envelope import build_envelope
 
@@ -30,13 +31,63 @@ class ExploitChainRef(BaseModel):
     step_count: int
 
 
+# ── V2 Embedded Data Schemas (for eliminating HTTP calls) ────────────────
+
+class FindingData(BaseModel):
+    """Embedded finding data to avoid HTTP calls to Core Engine."""
+
+    finding_id: UUID
+    title: str
+    severity: str = "unknown"
+    vulnerability_type: str | None = None
+    cvss_score: float | None = None
+    cvss_vector: str | None = None
+    affected_url: str | None = None
+    affected_parameter: str | None = None
+    description: str | None = None
+    reproduction_steps: str | None = None
+    is_verified: bool = False
+    is_false_positive: bool = False
+    false_positive_reason: str | None = None
+    deduplication_hash: str | None = None
+    source: str | None = None
+    raw_output: dict | None = None
+    created_at: datetime | None = None
+    program_id: UUID | None = None
+
+
+class EvidenceData(BaseModel):
+    """Embedded evidence data to avoid HTTP calls to Core Engine."""
+
+    evidence_id: UUID
+    finding_id: UUID | None = None
+    artifact_type: str | None = None
+    storage_path: str | None = None
+    description: str | None = None
+    captured_at: datetime | None = None
+
+
+class ScanSummary(BaseModel):
+    """Summary of scan to avoid HTTP calls to Core Engine."""
+
+    scan_id: UUID
+    program_id: UUID
+    started_at: datetime | None = None
+    completed_at: datetime | None = None
+    status: str
+    total_findings: int = 0
+    severity_breakdown: dict = Field(default_factory=dict)
+    partial_detail: dict | None = None
+    error_detail: str | None = None
+
+
 # ── Primary payload ────────────────────────────────────────────────────────
 
 class ReportJobsPayload(BaseModel):
     """
     Payload schema for queue: report.jobs
     Event type:     scan.completed
-    Schema version: 1.0
+    Schema version: 1.0 or 2.0 (with embedded data)
     Producer:       core-engine (core-worker)
     Consumer:       reporter-worker
 
@@ -45,6 +96,7 @@ class ReportJobsPayload(BaseModel):
 
     Version history:
         1.0 — initial schema
+        2.0 — embedded data (findings, evidence) to eliminate HTTP calls
     """
 
     model_config = ConfigDict(extra="ignore")
@@ -54,27 +106,68 @@ class ReportJobsPayload(BaseModel):
     program_id: UUID
 
     # ── Scan outcome ───────────────────────────────────────────────────
-    status: Literal["completed", "partial"]
+    status: Literal["completed", "partial"] = Field(
+        default="completed",
+        description="Scan completion status",
+    )
     partial_stages: list[str] = Field(
         default_factory=list,
         description="Names of stages with non-fatal failures. Noted in Executive Summary.",
     )
 
     # ── Finding summary ────────────────────────────────────────────────
-    has_findings: bool
-    finding_count: int = Field(ge=0)
-    verified_count: int = Field(ge=0)
-    severity_breakdown: SeverityBreakdown
+    has_findings: bool = Field(
+        default=False,
+        description="Whether the scan has any findings",
+    )
+    finding_count: int = Field(
+        default=0,
+        ge=0,
+        description="Total number of findings",
+    )
+    verified_count: int = Field(
+        default=0,
+        ge=0,
+        description="Number of verified findings",
+    )
+    severity_breakdown: SeverityBreakdown = Field(
+        default_factory=SeverityBreakdown,
+        description="Breakdown of findings by severity",
+    )
 
     # ── Exploit chains ─────────────────────────────────────────────────
     exploit_chains: list[ExploitChainRef] = Field(default_factory=list)
 
     # ── Report generation parameters ──────────────────────────────────
-    formats_requested: list[Literal["pdf", "docx"]] = Field(
+    formats_requested: list[Literal["pdf", "docx", "json"]] = Field(
         default_factory=lambda: ["pdf", "docx"],
     )
     report_ids: dict[Literal["pdf", "docx"], UUID] | None = None
     include_evidence_screenshots: bool = Field(default=True)
+
+    # ── V2: Embedded data (eliminates HTTP calls) ────────────────────
+    payload_version: int = Field(default=2, ge=1, description="1=legacy, 2=embedded data")
+    scan_summary: ScanSummary | None = Field(
+        default=None,
+        description="Embedded scan summary to avoid HTTP call to Core Engine"
+    )
+    findings: list[FindingData] = Field(
+        default_factory=list,
+        description="Embedded findings to avoid HTTP calls to Core Engine"
+    )
+    evidence: list[EvidenceData] = Field(
+        default_factory=list,
+        description="Embedded evidence to avoid HTTP calls to Core Engine"
+    )
+
+    # Computed fields for backward compatibility
+    def is_legacy(self) -> bool:
+        """Check if this is a legacy payload without embedded data."""
+        return self.payload_version < 2
+
+    def has_embedded_data(self) -> bool:
+        """Check if this payload has embedded data."""
+        return self.payload_version >= 2 and len(self.findings) > 0
 
     @field_validator("finding_count")
     @classmethod
@@ -89,12 +182,23 @@ class ReportJobsPayload(BaseModel):
     @field_validator("formats_requested", mode="before")
     @classmethod
     def normalize_formats_requested(cls, v: Any) -> list[str]:
+        # Legacy alias used by some tests/code paths.
+        if isinstance(v, dict) and "formats" in v:
+            v = v.get("formats")
         if v is None:
             return ["pdf", "docx"]
         if isinstance(v, list) and len(v) == 0:
             # Compatibility rule for M4: empty list means "use defaults".
             return ["pdf", "docx"]
         return v
+
+    @model_validator(mode="before")
+    @classmethod
+    def map_legacy_formats_field(cls, values: Any) -> Any:
+        if isinstance(values, dict) and "formats_requested" not in values and "formats" in values:
+            values = dict(values)
+            values["formats_requested"] = values.pop("formats")
+        return values
 
     @model_validator(mode="after")
     def validate_report_ids_match_formats(self) -> "ReportJobsPayload":
@@ -111,6 +215,7 @@ class ReportJobsPayload(BaseModel):
 
 # ── Envelope builder helper ────────────────────────────────────────────────
 
+
 def build_report_job_message(
     payload: ReportJobsPayload,
     source_service: str = "core-engine",
@@ -123,6 +228,6 @@ def build_report_job_message(
         event_type="scan.completed",
         payload=payload.model_dump(mode="json"),
         source_service=source_service,
-        schema_version="1.0",
+        schema_version="2.0",
         trace_id=trace_id,
     )
